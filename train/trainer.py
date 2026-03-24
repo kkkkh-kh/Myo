@@ -1,18 +1,29 @@
-import csv
+﻿import csv
+import json
 import logging
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List
 
 import torch
 from torch import nn
 from torch.ao.quantization import get_default_qat_qconfig, prepare_qat
 from tqdm import tqdm
 
-from train.evaluate import compute_bleu4
+from train.evaluate import compute_bleu4, compute_rouge_l, compute_wer
 from train.loss import LabelSmoothingLoss
 
 
 LOGGER = logging.getLogger(__name__)
+LOG_COLUMNS = [
+    "run_id",
+    "epoch",
+    "train_loss",
+    "val_loss",
+    "val_bleu4",
+    "val_rouge_l",
+    "val_wer",
+    "teacher_forcing_ratio",
+]
 
 
 class Trainer:
@@ -26,12 +37,16 @@ class Trainer:
         self.device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
         self.model.to(self.device)
         self.current_epoch = 0
+        self.run_id = str(config.get("run_id", "default_run"))
         self.save_dir = Path(config.get("save_dir", "./checkpoints"))
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.save_dir / "training_log.csv"
+        self.samples_path = self.save_dir / "validation_samples.jsonl"
+        self.validation_sample_size = max(0, int(config["train"].get("validation_sample_size", 5)))
+        self.validation_beam_size = max(1, int(config["train"].get("validation_beam_size", 1)))
         self.criterion = LabelSmoothingLoss(
             vocab_size=config["model"]["zh_vocab_size"],
-            smoothing=config["train"].get("label_smoothing", 0.1),
+            smoothing=config["train"].get("label_smoothing", 0.05),
             ignore_index=0,
         )
         self.qat_prepared = False
@@ -40,9 +55,16 @@ class Trainer:
         train_cfg = self.config["train"]
         start = train_cfg.get("teacher_forcing_ratio_start", 1.0)
         end = train_cfg.get("teacher_forcing_ratio_end", 0.5)
-        decay_epochs = max(1, train_cfg.get("teacher_forcing_decay_epochs", 20))
-        progress = min(self.current_epoch / decay_epochs, 1.0)
+        decay_epochs = max(1, train_cfg.get("teacher_forcing_decay_epochs", 12))
+        progress = min(self.current_epoch / max(1, decay_epochs - 1), 1.0)
         return start + (end - start) * progress
+
+    def _set_dataset_epoch(self, dataloader: Iterable) -> None:
+        dataset = getattr(dataloader, "dataset", None)
+        if dataset is None or not hasattr(dataset, "set_epoch"):
+            return
+        total_epochs = self.config.get("train", {}).get("epochs")
+        dataset.set_epoch(self.current_epoch, total_epochs=total_epochs)
 
     def _prepare_qat_if_needed(self) -> None:
         if self.qat_prepared or not self.config["train"].get("qat_enabled", True):
@@ -66,6 +88,7 @@ class Trainer:
     def train_epoch(self, dataloader: Iterable) -> float:
         self.model.train()
         self._prepare_qat_if_needed()
+        self._set_dataset_epoch(dataloader)
         teacher_forcing_ratio = self._teacher_forcing_ratio()
         total_loss = 0.0
         total_batches = 0
@@ -88,16 +111,18 @@ class Trainer:
 
         return total_loss / max(1, total_batches)
 
-    def validate(self, dataloader: Iterable) -> Tuple[float, float]:
+    def validate(self, dataloader: Iterable) -> Dict[str, Any]:
         self.model.eval()
         total_loss = 0.0
         total_batches = 0
-        hypotheses = []
-        references = []
+        hypotheses: List[str] = []
+        references: List[str] = []
+        samples: List[Dict[str, str]] = []
+        gloss_vocab = getattr(dataloader.dataset, "gloss_vocab", None)
         zh_vocab = getattr(dataloader.dataset, "zh_vocab", None)
 
         with torch.no_grad():
-            progress = tqdm(dataloader, desc="验证中", leave=False)
+            progress = tqdm(dataloader, desc=f"验证第 {self.current_epoch + 1} 轮", leave=False)
             for gloss_ids, _, zh_ids, _ in progress:
                 gloss_ids = gloss_ids.to(self.device)
                 zh_ids = zh_ids.to(self.device)
@@ -107,32 +132,115 @@ class Trainer:
                 total_batches += 1
                 progress.set_postfix(loss=f"{loss.item():.4f}")
 
-                if zh_vocab is not None:
-                    predictions = self.model.translate(gloss_ids, max_len=zh_ids.size(1) - 1)
-                    for predicted_ids, reference_ids in zip(predictions.cpu(), zh_ids.cpu()):
-                        hypotheses.append(zh_vocab.decode(predicted_ids.tolist()))
-                        references.append(zh_vocab.decode(reference_ids.tolist()))
+                if zh_vocab is None:
+                    continue
+
+                predictions = self.model.translate(
+                    gloss_ids,
+                    max_len=zh_ids.size(1) - 1,
+                    beam_size=self.validation_beam_size,
+                )
+                for source_ids, predicted_ids, reference_ids in zip(
+                    gloss_ids.cpu(),
+                    predictions.cpu(),
+                    zh_ids.cpu(),
+                ):
+                    hypothesis = zh_vocab.decode(predicted_ids.tolist())
+                    reference = zh_vocab.decode(reference_ids.tolist())
+                    hypotheses.append(hypothesis)
+                    references.append(reference)
+
+                    if len(samples) < self.validation_sample_size:
+                        gloss_text = gloss_vocab.decode(source_ids.tolist()) if gloss_vocab is not None else ""
+                        samples.append(
+                            {
+                                "gloss": gloss_text,
+                                "reference": reference,
+                                "prediction": hypothesis,
+                            }
+                        )
 
         average_loss = total_loss / max(1, total_batches)
-        bleu4 = compute_bleu4(hypotheses, references) if hypotheses else 0.0
-        return average_loss, bleu4
+        if samples:
+            print("\n===== 验证样本预览 =====")
+            for index, sample in enumerate(samples[:3], start=1):
+                print(f"[{index}] Gloss    : {sample['gloss']}")
+                print(f"[{index}] 参考答案 : {sample['reference']}")
+                print(f"[{index}] 模型生成 : {sample['prediction']}")
+                print("---")
+
+        if not hypotheses:
+            return {"loss": average_loss, "bleu4": 0.0, "rouge_l": 0.0, "wer": 0.0, "samples": samples}
+        return {
+            "loss": average_loss,
+            "bleu4": compute_bleu4(hypotheses, references),
+            "rouge_l": compute_rouge_l(hypotheses, references),
+            "wer": compute_wer(hypotheses, references),
+            "samples": samples,
+        }
+
+    def _archive_legacy_log_if_needed(self) -> None:
+        if not self.log_path.exists():
+            return
+        with self.log_path.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.reader(file)
+            existing_header = next(reader, [])
+        if existing_header == LOG_COLUMNS:
+            return
+
+        legacy_path = self.save_dir / f"{self.log_path.stem}.legacy.csv"
+        suffix = 1
+        while legacy_path.exists():
+            legacy_path = self.save_dir / f"{self.log_path.stem}.legacy_{suffix}.csv"
+            suffix += 1
+        self.log_path.replace(legacy_path)
+        LOGGER.info("旧版训练日志已归档到 %s", legacy_path)
 
     def _write_log_header(self) -> None:
+        self._archive_legacy_log_if_needed()
         if self.log_path.exists():
             return
         with self.log_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
-            writer.writerow(["epoch", "train_loss", "val_loss", "val_bleu4", "teacher_forcing_ratio"])
+            writer.writerow(LOG_COLUMNS)
 
-    def _append_log(self, epoch: int, train_loss: float, val_loss: float, val_bleu4: float, tf_ratio: float) -> None:
+    def _append_log(self, epoch: int, train_loss: float, validation: Dict[str, Any], tf_ratio: float) -> None:
         with self.log_path.open("a", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
-            writer.writerow([epoch, f"{train_loss:.6f}", f"{val_loss:.6f}", f"{val_bleu4:.4f}", f"{tf_ratio:.4f}"])
+            writer.writerow(
+                [
+                    self.run_id,
+                    epoch,
+                    f"{train_loss:.6f}",
+                    f"{validation['loss']:.6f}",
+                    f"{validation['bleu4']:.4f}",
+                    f"{validation['rouge_l']:.4f}",
+                    f"{validation['wer']:.4f}",
+                    f"{tf_ratio:.4f}",
+                ]
+            )
+
+    def _append_validation_samples(self, epoch: int, validation: Dict[str, Any]) -> None:
+        if self.validation_sample_size <= 0:
+            return
+        record = {
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "val_loss": round(float(validation["loss"]), 6),
+            "val_bleu4": round(float(validation["bleu4"]), 4),
+            "val_rouge_l": round(float(validation["rouge_l"]), 4),
+            "val_wer": round(float(validation["wer"]), 4),
+            "samples": validation["samples"],
+        }
+        with self.samples_path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def train(self, train_loader: Iterable, val_loader: Iterable) -> Dict[str, float]:
         self._write_log_header()
         best_val_loss = float("inf")
         best_bleu = 0.0
+        best_rouge_l = 0.0
+        best_wer = 0.0
         patience = 0
         max_epochs = self.config["train"].get("epochs", 50)
         early_stop = self.config["train"].get("early_stopping_patience", 5)
@@ -141,36 +249,47 @@ class Trainer:
         for epoch in range(max_epochs):
             self.current_epoch = epoch
             train_loss = self.train_epoch(train_loader)
-            val_loss, val_bleu4 = self.validate(val_loader)
+            validation = self.validate(val_loader)
+            val_loss = validation["loss"]
+            val_bleu4 = validation["bleu4"]
+            val_rouge_l = validation["rouge_l"]
+            val_wer = validation["wer"]
             tf_ratio = self._teacher_forcing_ratio()
-            self._append_log(epoch + 1, train_loss, val_loss, val_bleu4, tf_ratio)
+            self._append_log(epoch + 1, train_loss, validation, tf_ratio)
+            self._append_validation_samples(epoch + 1, validation)
 
-            if self.scheduler is not None:
-                if hasattr(self.scheduler, "step"):
-                    try:
-                        self.scheduler.step(val_loss)
-                    except TypeError:
-                        self.scheduler.step()
+            if self.scheduler is not None and hasattr(self.scheduler, "step"):
+                try:
+                    self.scheduler.step(val_loss)
+                except TypeError:
+                    self.scheduler.step()
 
             LOGGER.info(
-                "第 %s 轮完成：训练损失 %.4f，验证损失 %.4f，BLEU-4 %.2f",
+                "第 %s 轮完成：训练损失 %.4f，验证损失 %.4f，BLEU-4 %.2f，ROUGE-L %.2f，WER %.2f",
                 epoch + 1,
                 train_loss,
                 val_loss,
                 val_bleu4,
+                val_rouge_l,
+                val_wer,
             )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_bleu = val_bleu4
+                best_rouge_l = val_rouge_l
+                best_wer = val_wer
                 patience = 0
                 torch.save(
                     {
                         "model_state_dict": self.model.state_dict(),
                         "config": self.config,
+                        "run_id": self.run_id,
                         "epoch": epoch + 1,
                         "val_loss": val_loss,
                         "val_bleu4": val_bleu4,
+                        "val_rouge_l": val_rouge_l,
+                        "val_wer": val_wer,
                     },
                     best_model_path,
                 )
@@ -181,4 +300,11 @@ class Trainer:
                     LOGGER.info("触发早停，训练结束。")
                     break
 
-        return {"best_val_loss": best_val_loss, "best_bleu4": best_bleu, "best_model_path": str(best_model_path)}
+        return {
+            "best_val_loss": best_val_loss,
+            "best_bleu4": best_bleu,
+            "best_rouge_l": best_rouge_l,
+            "best_wer": best_wer,
+            "best_model_path": str(best_model_path),
+            "validation_samples_path": str(self.samples_path),
+        }

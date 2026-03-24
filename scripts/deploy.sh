@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,9 +68,6 @@ import os
 import sys
 from pathlib import Path
 
-import torch
-import yaml
-
 ROOT_DIR = Path(os.environ["ROOT_DIR"])
 MODEL_DIR = Path(os.environ["MODEL_DIR"])
 CONFIG_PATH = Path(os.environ["CONFIG_PATH"])
@@ -78,41 +75,18 @@ CONFIG_PATH = Path(os.environ["CONFIG_PATH"])
 if ROOT_DIR.as_posix() not in sys.path:
     sys.path.insert(0, ROOT_DIR.as_posix())
 
-from data.vocabulary import Vocabulary
-from deploy.export_onnx import export_to_onnx
+from deploy.export_onnx import export_to_onnx, load_model_for_export
 from deploy.quantize import quantize_models
-from model.decoder import ChineseDecoder
-from model.encoder import GlossEncoder
-from model.seq2seq import Seq2Seq
 
-checkpoint_path = MODEL_DIR / "best_model.pt"
-if not checkpoint_path.exists():
-    raise FileNotFoundError(f"未找到最佳模型：{checkpoint_path}")
 if not (MODEL_DIR / "gloss_vocab.json").exists() or not (MODEL_DIR / "zh_vocab.json").exists():
     raise FileNotFoundError("未找到词表文件，请先运行训练脚本。")
 
-with CONFIG_PATH.open("r", encoding="utf-8") as file:
-    config = yaml.safe_load(file)
-
-gloss_vocab = Vocabulary.load(MODEL_DIR / "gloss_vocab.json")
-zh_vocab = Vocabulary.load(MODEL_DIR / "zh_vocab.json")
-config["model"]["gloss_vocab_size"] = len(gloss_vocab)
-config["model"]["zh_vocab_size"] = len(zh_vocab)
-
-encoder = GlossEncoder(**config["model"])
-decoder = ChineseDecoder(
-    zh_vocab_size=config["model"]["zh_vocab_size"],
-    embed_dim=config["model"]["embed_dim"],
-    hidden_dim=config["model"]["hidden_dim"],
-    num_layers=config["model"]["num_layers"],
-    dropout=config["model"]["dropout"],
+model, checkpoint_path, _ = load_model_for_export(
+    save_dir=MODEL_DIR.as_posix(),
+    config_path=CONFIG_PATH.as_posix(),
 )
-model = Seq2Seq(encoder=encoder, decoder=decoder)
-state = torch.load(checkpoint_path, map_location="cpu")
-model.load_state_dict(state["model_state_dict"])
 model.eval()
-
-export_to_onnx(model, MODEL_DIR.as_posix())
+export_to_onnx(model, MODEL_DIR.as_posix(), checkpoint_path=checkpoint_path.as_posix())
 quantize_models(MODEL_DIR.as_posix(), MODEL_DIR.as_posix())
 print(f"部署文件已生成到：{MODEL_DIR}")
 PY
