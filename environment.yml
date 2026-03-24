@@ -1,0 +1,19 @@
+name: sign-language-translator
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip=24.0
+  - setuptools>=68,<81
+  - wheel
+  - pip:
+      - torch==2.1.0
+      - onnx==1.15.0
+      - onnxruntime==1.16.0
+      - numpy==1.24.0
+      - pyyaml==6.0
+      - sacrebleu==2.3.1
+      - rouge-score==0.1.2
+      - psutil==5.9.5
+      - tqdm==4.66.1
+      - jieba==0.42.1
