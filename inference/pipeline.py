@@ -44,7 +44,7 @@ class TranslationPipeline:
         for candidate in candidates:
             if candidate.exists():
                 return candidate
-        raise FileNotFoundError(f"未找到模型文件：{candidates[0]} 或 {candidates[1]}")
+        raise FileNotFoundError(f"Model file not found: {candidates[0]} or {candidates[1]}")
 
     def _ensure_loaded(self) -> None:
         if self.encoder_session is not None and self.decoder_session is not None:
@@ -52,7 +52,7 @@ class TranslationPipeline:
         gloss_vocab_path = self.model_dir / "gloss_vocab.json"
         zh_vocab_path = self.model_dir / "zh_vocab.json"
         if not gloss_vocab_path.exists() or not zh_vocab_path.exists():
-            raise FileNotFoundError("未找到词表文件，请先导出 gloss_vocab.json 和 zh_vocab.json。")
+            raise FileNotFoundError("Vocabulary files not found. Export gloss_vocab.json and zh_vocab.json first.")
 
         self.gloss_vocab = Vocabulary.load(gloss_vocab_path)
         self.zh_vocab = Vocabulary.load(zh_vocab_path)
@@ -88,6 +88,14 @@ class TranslationPipeline:
                 tokens.append(Vocabulary.UNK_TOKEN)
         return tokens
 
+    def _apply_generation_constraints(self, logits: np.ndarray, step: int) -> np.ndarray:
+        constrained = np.array(logits, copy=True)
+        constrained[..., Vocabulary.PAD_ID] = -np.inf
+        constrained[..., Vocabulary.BOS_ID] = -np.inf
+        if step < 1:
+            constrained[..., Vocabulary.EOS_ID] = -np.inf
+        return constrained
+
     def translate(self, gloss_sequence: str) -> str:
         self._ensure_loaded()
         input_ids = self._prepare_gloss_ids(gloss_sequence)
@@ -97,7 +105,7 @@ class TranslationPipeline:
         input_token = np.asarray([Vocabulary.BOS_ID], dtype=np.int64)
         predicted_ids: List[int] = []
 
-        for _ in range(self.max_decode_len):
+        for step in range(self.max_decode_len):
             logits, hidden, _ = self.decoder_session.run(
                 None,
                 {
@@ -107,7 +115,8 @@ class TranslationPipeline:
                     "src_mask": src_mask,
                 },
             )
-            next_token = int(np.argmax(logits, axis=-1)[0])
+            constrained_logits = self._apply_generation_constraints(logits, step)
+            next_token = int(np.argmax(constrained_logits, axis=-1)[0])
             if next_token == Vocabulary.EOS_ID:
                 break
             predicted_ids.append(next_token)
@@ -118,3 +127,4 @@ class TranslationPipeline:
     def batch_translate(self, gloss_list: List[str]) -> List[str]:
         self._ensure_loaded()
         return [self.translate(gloss) for gloss in gloss_list]
+

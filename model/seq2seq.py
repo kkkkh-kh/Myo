@@ -56,24 +56,40 @@ class Seq2Seq(nn.Module):
         )
         return torch.cat([predictions, pad], dim=1)
 
-    def _greedy_translate(self, gloss_ids: torch.Tensor, max_len: int) -> torch.Tensor:
+    def _apply_generation_constraints(self, logits: torch.Tensor, step: int, min_len: int) -> torch.Tensor:
+        constrained = logits.clone()
+        constrained[:, self.pad_id] = float("-inf")
+        constrained[:, self.bos_id] = float("-inf")
+        if step < max(0, min_len):
+            constrained[:, self.eos_id] = float("-inf")
+        return constrained
+
+    def _greedy_translate(self, gloss_ids: torch.Tensor, max_len: int, min_len: int = 1) -> torch.Tensor:
         enc_output, encoder_hidden = self.encoder(gloss_ids)
         src_mask = gloss_ids.ne(self.pad_id)
-        _, predictions, _ = self.decoder(
-            encoder_hidden=encoder_hidden,
-            enc_output=enc_output,
-            src_mask=src_mask,
-            target_tokens=None,
-            max_len=max_len,
-            teacher_forcing_ratio=0.0,
-            bos_id=self.bos_id,
-            eos_id=self.eos_id,
-        )
-        return self._pad_predictions(predictions, max_len)
+        hidden = self.decoder.init_hidden(encoder_hidden)
+        batch_size = gloss_ids.size(0)
+        input_tokens = torch.full((batch_size,), self.bos_id, dtype=torch.long, device=gloss_ids.device)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=gloss_ids.device)
+        predictions = []
 
-    def _beam_translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int) -> torch.Tensor:
+        for step in range(max_len):
+            logits, hidden, _ = self.decoder.forward_step(input_tokens, hidden, enc_output, src_mask)
+            logits = self._apply_generation_constraints(logits, step, min_len=min_len)
+            next_tokens = logits.argmax(dim=-1)
+            next_tokens = torch.where(finished, torch.full_like(next_tokens, self.pad_id), next_tokens)
+            predictions.append(next_tokens)
+            finished = finished | next_tokens.eq(self.eos_id)
+            input_tokens = torch.where(finished, torch.full_like(next_tokens, self.eos_id), next_tokens)
+            if finished.all():
+                break
+
+        prediction_tensor = torch.stack(predictions, dim=1)
+        return self._pad_predictions(prediction_tensor, max_len)
+
+    def _beam_translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int, min_len: int = 1) -> torch.Tensor:
         if gloss_ids.size(0) != 1:
-            return self._greedy_translate(gloss_ids, max_len)
+            return self._greedy_translate(gloss_ids, max_len, min_len=min_len)
 
         enc_output, encoder_hidden = self.encoder(gloss_ids)
         src_mask = gloss_ids.ne(self.pad_id)
@@ -89,6 +105,7 @@ class Seq2Seq(nn.Module):
                     continue
                 input_token = torch.tensor([last_token], device=gloss_ids.device)
                 logits, next_hidden, _ = self.decoder.forward_step(input_token, beam_hidden, enc_output, src_mask)
+                logits = self._apply_generation_constraints(logits, step=max(0, len(sequence) - 1), min_len=min_len)
                 log_probs = F.log_softmax(logits, dim=-1)
                 top_scores, top_indices = log_probs.topk(beam_size, dim=-1)
                 for token_score, token_index in zip(top_scores[0], top_indices[0]):
@@ -109,10 +126,11 @@ class Seq2Seq(nn.Module):
         prediction = torch.tensor(best_sequence, dtype=torch.long, device=gloss_ids.device).unsqueeze(0)
         return self._pad_predictions(prediction, max_len)
 
-    def translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int = 1) -> torch.Tensor:
+    def translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int = 1, min_len: int = 1) -> torch.Tensor:
         if beam_size <= 1:
-            return self._greedy_translate(gloss_ids, max_len)
-        return self._beam_translate(gloss_ids, max_len, beam_size)
+            return self._greedy_translate(gloss_ids, max_len, min_len=min_len)
+        return self._beam_translate(gloss_ids, max_len, beam_size, min_len=min_len)
 
     def count_parameters(self) -> int:
         return sum(param.numel() for param in self.parameters() if param.requires_grad)
+

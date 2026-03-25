@@ -1,4 +1,4 @@
-﻿# Module description: ONNX export utilities for encoder-decoder deployment artifacts.
+# Module description: ONNX export utilities for encoder-decoder deployment artifacts.
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from data.vocabulary import Vocabulary
 from model.decoder import ChineseDecoder
 from model.encoder import GlossEncoder
 from model.seq2seq import Seq2Seq
+from train.checkpointing import load_checkpoint_into_model
 
 
 class EncoderExportWrapper(nn.Module):
@@ -125,8 +126,7 @@ def load_model_for_export(
     model = Seq2Seq(encoder=encoder, decoder=decoder)
 
     resolved_checkpoint = Path(checkpoint_path) if checkpoint_path is not None else _resolve_checkpoint_path(save_path, config)
-    state = torch.load(resolved_checkpoint.as_posix(), map_location="cpu")
-    model.load_state_dict(state.get("model_state_dict", state))
+    load_checkpoint_into_model(model, resolved_checkpoint)
     model.eval()
     print(f"当前导出的权重文件: {resolved_checkpoint}")
     return model, resolved_checkpoint, config
@@ -208,3 +208,5 @@ def export_to_onnx(
 
     print(f"编码器 ONNX 导出完成，大小 {_size_mb(encoder_path):.2f} MB")
     print(f"解码器 ONNX 导出完成，大小 {_size_mb(decoder_path):.2f} MB")
+
+

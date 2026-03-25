@@ -1,4 +1,4 @@
-﻿# Module description: knowledge distillation trainer for gloss-to-Chinese Seq2Seq models.
+# Module description: knowledge distillation trainer for gloss-to-Chinese Seq2Seq models.
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from torch import nn
 from torch.optim import AdamW
 from tqdm import tqdm
 
+from train.checkpointing import extract_state_dict, load_checkpoint_into_model
 from train.evaluate import evaluate_model
 from train.loss import LabelSmoothingLoss
 
@@ -86,21 +87,18 @@ class DistillTrainer:
         project_root = Path(self.config.get("project_root", Path(__file__).resolve().parents[1]))
         return (project_root / path).resolve()
 
-    def _extract_state_dict(self, checkpoint: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        return checkpoint.get("model_state_dict", checkpoint)
-
     def _load_teacher(self) -> None:
         if not self.teacher_path.exists():
             raise FileNotFoundError(f"Teacher checkpoint not found: {self.teacher_path}")
-        checkpoint = torch.load(self.teacher_path.as_posix(), map_location="cpu")
-        state_dict = self._extract_state_dict(checkpoint)
-        self.teacher.load_state_dict(state_dict)
+
+        checkpoint = load_checkpoint_into_model(self.teacher, self.teacher_path)
+        state_dict = extract_state_dict(checkpoint)
         self.teacher.eval()
         for parameter in self.teacher.parameters():
             parameter.requires_grad_(False)
 
         if self.student_init == "hot_start":
-            self.student.load_state_dict(state_dict)
+            load_checkpoint_into_model(self.student, {"model_state_dict": state_dict})
 
     def _set_dataset_epoch(self, dataloader: Iterable) -> None:
         dataset = getattr(dataloader, "dataset", None)
@@ -252,3 +250,4 @@ class DistillTrainer:
                 LOGGER.info("已保存蒸馏模型到 %s", self.save_path)
 
         return best_metrics
+

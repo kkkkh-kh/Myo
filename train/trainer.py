@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import json
 import logging
 from pathlib import Path
@@ -6,9 +6,9 @@ from typing import Any, Dict, Iterable, List
 
 import torch
 from torch import nn
-from torch.ao.quantization import get_default_qat_qconfig, prepare_qat
 from tqdm import tqdm
 
+from train.checkpointing import prepare_model_for_qat
 from train.evaluate import compute_bleu4, compute_rouge_l, compute_wer
 from train.loss import LabelSmoothingLoss
 
@@ -66,18 +66,25 @@ class Trainer:
         total_epochs = self.config.get("train", {}).get("epochs")
         dataset.set_epoch(self.current_epoch, total_epochs=total_epochs)
 
+    def _default_qat_start_epoch(self) -> int:
+        max_epochs = max(1, int(self.config.get("train", {}).get("epochs", 1)))
+        if max_epochs <= 1:
+            return 0
+        return min(max_epochs - 1, max(1, int(max_epochs * 0.7)))
+
     def _prepare_qat_if_needed(self) -> None:
-        if self.qat_prepared or not self.config["train"].get("qat_enabled", True):
+        train_cfg = self.config.get("train", {})
+        if self.qat_prepared or not train_cfg.get("qat_enabled", False):
             return
+
+        qat_start_epoch = max(0, int(train_cfg.get("qat_start_epoch", self._default_qat_start_epoch())))
+        if self.current_epoch < qat_start_epoch:
+            return
+
         try:
-            self.model.train()
-            self.model.qconfig = get_default_qat_qconfig("fbgemm")
-            for module in self.model.modules():
-                if isinstance(module, (nn.GRU, nn.Embedding)):
-                    module.qconfig = None
-            prepare_qat(self.model, inplace=True)
+            prepare_model_for_qat(self.model)
             self.qat_prepared = True
-            LOGGER.info("已启用 QAT 训练准备。")
+            LOGGER.info("已在第 %s 轮启用 QAT 训练准备。", self.current_epoch + 1)
         except Exception as exc:
             LOGGER.warning("QAT 准备失败，继续普通训练：%s", exc)
 
@@ -308,3 +315,4 @@ class Trainer:
             "best_model_path": str(best_model_path),
             "validation_samples_path": str(self.samples_path),
         }
+

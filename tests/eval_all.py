@@ -1,4 +1,4 @@
-﻿# Module description: unified evaluation script for PyTorch and ONNX gloss-to-Chinese models.
+# Module description: unified evaluation script for PyTorch and ONNX gloss-to-Chinese models.
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from inference.pipeline import TranslationPipeline
 from model.decoder import ChineseDecoder
 from model.encoder import GlossEncoder
 from model.seq2seq import Seq2Seq
+from train.checkpointing import load_checkpoint_into_model
 from train.evaluate import compute_bleu4, compute_rouge_l, compute_wer
 
 try:
@@ -107,8 +108,7 @@ def _process() -> Optional["psutil.Process"]:
 
 def evaluate_pytorch_model(checkpoint_path: Path, checkpoint_dir: Path, config: Dict, data_path: Path) -> Dict[str, object]:
     model = build_model(config, checkpoint_dir)
-    state = torch.load(checkpoint_path.as_posix(), map_location="cpu")
-    model.load_state_dict(state.get("model_state_dict", state))
+    load_checkpoint_into_model(model, checkpoint_path)
     model.eval()
     loader = build_test_loader(checkpoint_dir, data_path, config)
     dataset = loader.dataset
@@ -322,4 +322,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 

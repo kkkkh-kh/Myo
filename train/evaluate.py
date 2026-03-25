@@ -2,7 +2,6 @@ from typing import Dict, Iterable, List
 
 import sacrebleu
 import torch
-from rouge_score import rouge_scorer
 
 from data.vocabulary import Vocabulary
 
@@ -14,6 +13,15 @@ def _space_for_metrics(text: str) -> str:
     if " " in stripped:
         return stripped
     return " ".join(list(stripped))
+
+
+def _tokens_for_metrics(text: str) -> List[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if " " in stripped:
+        return [token for token in stripped.split() if token]
+    return [char for char in stripped if char.strip()]
 
 
 def compute_bleu4(hypotheses: List[str], references: List[str]) -> float:
@@ -29,14 +37,42 @@ def compute_bleu4(hypotheses: List[str], references: List[str]) -> float:
     return float(bleu.score)
 
 
+def _lcs_length(source: List[str], target: List[str]) -> int:
+    if not source or not target:
+        return 0
+
+    previous = [0] * (len(target) + 1)
+    for source_token in source:
+        current = [0]
+        for index, target_token in enumerate(target, start=1):
+            if source_token == target_token:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
 def compute_rouge_l(hypotheses: List[str], references: List[str]) -> float:
     if not hypotheses:
         return 0.0
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-    scores = [
-        scorer.score(reference, hypothesis)["rougeL"].fmeasure
-        for hypothesis, reference in zip(hypotheses, references)
-    ]
+
+    scores: List[float] = []
+    for hypothesis, reference in zip(hypotheses, references):
+        hyp_tokens = _tokens_for_metrics(hypothesis)
+        ref_tokens = _tokens_for_metrics(reference)
+        if not hyp_tokens or not ref_tokens:
+            scores.append(0.0)
+            continue
+
+        lcs = _lcs_length(hyp_tokens, ref_tokens)
+        precision = lcs / len(hyp_tokens)
+        recall = lcs / len(ref_tokens)
+        if precision + recall == 0.0:
+            scores.append(0.0)
+            continue
+        scores.append(2.0 * precision * recall / (precision + recall))
+
     return float(sum(scores) / len(scores) * 100.0)
 
 
@@ -63,8 +99,8 @@ def compute_wer(hypotheses: List[str], references: List[str]) -> float:
     total_distance = 0
     total_tokens = 0
     for hypothesis, reference in zip(hypotheses, references):
-        hyp_tokens = hypothesis.split() if " " in hypothesis else list(hypothesis)
-        ref_tokens = reference.split() if " " in reference else list(reference)
+        hyp_tokens = _tokens_for_metrics(hypothesis)
+        ref_tokens = _tokens_for_metrics(reference)
         total_distance += _edit_distance(hyp_tokens, ref_tokens)
         total_tokens += max(1, len(ref_tokens))
     return float(total_distance / max(1, total_tokens) * 100.0)
@@ -98,3 +134,4 @@ def evaluate_model(
         "rouge_l": compute_rouge_l(hypotheses, references),
         "wer": compute_wer(hypotheses, references),
     }
+
