@@ -1,0 +1,177 @@
+[
+  {
+    "pattern": ["VERB", "TIME"],
+    "replacement": ["TIME", "VERB"],
+    "example_gloss": "买 昨天",
+    "example_chinese": "昨天买",
+    "priority": 100
+  },
+  {
+    "pattern": ["OBJ", "VERB", "SUBJ"],
+    "replacement": ["SUBJ", "VERB", "OBJ"],
+    "example_gloss": "苹果 买 我",
+    "example_chinese": "我买苹果",
+    "priority": 99
+  },
+  {
+    "pattern": ["VERB", "NEG"],
+    "replacement": ["NEG", "VERB"],
+    "example_gloss": "去 不",
+    "example_chinese": "不去",
+    "priority": 98
+  },
+  {
+    "pattern": ["OBJ", "NEG", "VERB"],
+    "replacement": ["NEG", "VERB", "OBJ"],
+    "example_gloss": "苹果 不 买",
+    "example_chinese": "不买苹果",
+    "priority": 97
+  },
+  {
+    "pattern": ["VERB", "ASPECT", "OBJ"],
+    "replacement": ["VERB", "OBJ", "ASPECT"],
+    "example_gloss": "买 完 苹果",
+    "example_chinese": "买完苹果",
+    "priority": 96
+  },
+  {
+    "pattern": ["TIME", "SUBJ", "VERB"],
+    "replacement": ["SUBJ", "TIME", "VERB"],
+    "example_gloss": "昨天 我 买",
+    "example_chinese": "我昨天买",
+    "priority": 95
+  },
+  {
+    "pattern": ["LOC", "VERB", "SUBJ"],
+    "replacement": ["SUBJ", "LOC", "VERB"],
+    "example_gloss": "学校 去 我",
+    "example_chinese": "我去学校",
+    "priority": 94
+  },
+  {
+    "pattern": ["OBJ", "ADJ", "NOUN"],
+    "replacement": ["ADJ", "NOUN", "OBJ"],
+    "example_gloss": "衣服 红 色",
+    "example_chinese": "红色衣服",
+    "priority": 93
+  },
+  {
+    "pattern": ["QWORD", "SUBJ", "VERB"],
+    "replacement": ["SUBJ", "VERB", "QWORD"],
+    "example_gloss": "谁 去 申请",
+    "example_chinese": "谁去申请",
+    "priority": 92
+  },
+  {
+    "pattern": ["SUBJ", "QWORD", "VERB"],
+    "replacement": ["SUBJ", "VERB", "QWORD"],
+    "example_gloss": "你 什么 买",
+    "example_chinese": "你买什么",
+    "priority": 91
+  },
+  {
+    "pattern": ["MODAL", "SUBJ", "VERB"],
+    "replacement": ["SUBJ", "MODAL", "VERB"],
+    "example_gloss": "能 我 去",
+    "example_chinese": "我能去",
+    "priority": 90
+  },
+  {
+    "pattern": ["OBJ", "LOC", "VERB"],
+    "replacement": ["LOC", "VERB", "OBJ"],
+    "example_gloss": "材料 政府 交",
+    "example_chinese": "向政府交材料",
+    "priority": 89
+  },
+  {
+    "pattern": ["TIME", "OBJ", "VERB"],
+    "replacement": ["TIME", "VERB", "OBJ"],
+    "example_gloss": "昨天 苹果 买",
+    "example_chinese": "昨天买苹果",
+    "priority": 88
+  },
+  {
+    "pattern": ["ADV", "VERB", "OBJ"],
+    "replacement": ["ADV", "VERB", "OBJ"],
+    "example_gloss": "已经 完成 申请",
+    "example_chinese": "已经完成申请",
+    "priority": 87
+  },
+  {
+    "pattern": ["NUM", "NOUN"],
+    "replacement": ["NUM", "NOUN"],
+    "example_gloss": "三 苹果",
+    "example_chinese": "三个苹果",
+    "priority": 86
+  },
+  {
+    "pattern": ["PRON", "TIME", "LOC", "VERB"],
+    "replacement": ["PRON", "TIME", "LOC", "VERB"],
+    "example_gloss": "我 明天 医院 去",
+    "example_chinese": "我明天去医院",
+    "priority": 85
+  },
+  {
+    "pattern": ["LOC", "TIME", "VERB"],
+    "replacement": ["TIME", "LOC", "VERB"],
+    "example_gloss": "北京 今天 开会",
+    "example_chinese": "今天在北京开会",
+    "priority": 84
+  },
+  {
+    "pattern": ["NEG", "ASPECT", "VERB"],
+    "replacement": ["NEG", "VERB", "ASPECT"],
+    "example_gloss": "不 完 做",
+    "example_chinese": "没做完",
+    "priority": 83
+  },
+  {
+    "pattern": ["SUBJ", "OBJ", "VERB"],
+    "replacement": ["SUBJ", "VERB", "OBJ"],
+    "example_gloss": "我 苹果 买",
+    "example_chinese": "我买苹果",
+    "priority": 82
+  },
+  {
+    "pattern": ["AUX", "SUBJ", "VERB"],
+    "replacement": ["SUBJ", "AUX", "VERB"],
+    "example_gloss": "把 我 申请",
+    "example_chinese": "我把申请",
+    "priority": 81
+  },
+  {
+    "pattern": ["OBJ", "QWORD", "VERB"],
+    "replacement": ["VERB", "OBJ", "QWORD"],
+    "example_gloss": "材料 哪里 交",
+    "example_chinese": "材料交哪里",
+    "priority": 80
+  },
+  {
+    "pattern": ["SUBJ", "NEG", "MODAL", "VERB"],
+    "replacement": ["SUBJ", "NEG", "MODAL", "VERB"],
+    "example_gloss": "我 不 能 去",
+    "example_chinese": "我不能去",
+    "priority": 79
+  },
+  {
+    "pattern": ["TIME", "NEG", "VERB"],
+    "replacement": ["TIME", "NEG", "VERB"],
+    "example_gloss": "今天 不 去",
+    "example_chinese": "今天不去",
+    "priority": 78
+  },
+  {
+    "pattern": ["ADJ", "NOUN", "NUM"],
+    "replacement": ["NUM", "ADJ", "NOUN"],
+    "example_gloss": "红 苹果 三",
+    "example_chinese": "三个红苹果",
+    "priority": 77
+  },
+  {
+    "pattern": ["LOC", "OBJ", "VERB", "SUBJ"],
+    "replacement": ["SUBJ", "LOC", "VERB", "OBJ"],
+    "example_gloss": "政府 材料 交 我",
+    "example_chinese": "我向政府交材料",
+    "priority": 76
+  }
+]
