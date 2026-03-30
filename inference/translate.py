@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import sys
 from pathlib import Path
 
@@ -20,9 +20,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--file", type=str, help="批量输入文件，每行一条 gloss")
     parser.add_argument("--output", type=str, help="批量输出文件")
     parser.add_argument("--interactive", action="store_true", help="进入交互模式")
-    parser.add_argument("--model_dir", type=str, default=DEFAULT_MODELS.as_posix(), help="量化模型目录")
+    parser.add_argument("--model_dir", type=str, default=DEFAULT_MODELS.as_posix(), help="模型目录")
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG.as_posix(), help="配置文件路径")
     parser.add_argument("--memory_check", action="store_true", help="翻译前执行内存检测")
+    parser.add_argument("--no_postprocess", action="store_true", help="关闭语序后处理，便于对比实验")
     return parser
 
 
@@ -30,7 +31,7 @@ def _run_memory_check(pipeline: TranslationPipeline, seed_inputs) -> None:
     profiler = MemoryProfiler()
     result = profiler.measure_inference_memory(pipeline, seed_inputs)
     print(
-        "内存检测完成：峰值 {peak_mb:.2f}MB，平均 {mean_mb:.2f}MB，标准差 {std_mb:.2f}MB，超限次数 {passes_over_limit}".format(
+        "内存检测完成：峰值 {peak_mb:.2f}MB，均值 {mean_mb:.2f}MB，标准差 {std_mb:.2f}MB，超限次数 {passes_over_limit}".format(
             **result
         )
     )
@@ -67,7 +68,11 @@ def main() -> None:
     if not any([args.gloss, args.file, args.interactive]):
         parser.error("请至少提供 --gloss、--file 或 --interactive 之一")
 
-    pipeline = TranslationPipeline(model_dir=args.model_dir, config_path=args.config)
+    pipeline = TranslationPipeline(
+        model_dir=args.model_dir,
+        config_path=args.config,
+        enable_postprocess=not args.no_postprocess,
+    )
 
     if args.memory_check:
         if args.gloss:

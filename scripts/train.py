@@ -40,6 +40,21 @@ def resolve_dataset_path(data_dir: Path, *candidates: str) -> Path:
     )
 
 
+def resolve_train_path(data_dir: Path, config: dict) -> Path:
+    train_file_override = os.environ.get("TRAIN_FILE")
+    if train_file_override:
+        return resolve_dataset_path(data_dir, train_file_override)
+
+    augment_cfg = config.get("word_order_augment", {})
+    if augment_cfg.get("enabled", False):
+        for candidate in ("train_augmented.tsv", "train_augmented.csv"):
+            path = data_dir / candidate
+            if path.exists():
+                return path
+
+    return resolve_dataset_path(data_dir, "train.tsv", "train.csv")
+
+
 def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Vocabulary]:
     train_pairs = read_parallel_pairs(train_path.as_posix())
     zh_tokenizer_mode = config.get("data", {}).get("zh_tokenizer", "char")
@@ -105,11 +120,11 @@ def main() -> None:
     print(f"CONFIG_PATH : {CONFIG_PATH}")
     print(f"OUTPUT_DIR  : {OUTPUT_DIR}")
 
-    train_path = resolve_dataset_path(DATA_DIR, "train.tsv", "train.csv")
-    val_path = resolve_dataset_path(DATA_DIR, "val.tsv", "dev.tsv", "val.csv", "dev.csv")
-
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
+
+    train_path = resolve_train_path(DATA_DIR, config)
+    val_path = resolve_dataset_path(DATA_DIR, "val.tsv", "dev.tsv", "val.csv", "dev.csv")
 
     config["run_id"] = os.environ.get("RUN_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
     config["save_dir"] = OUTPUT_DIR.resolve().as_posix()
@@ -152,17 +167,24 @@ def main() -> None:
     print(f"Run ID      : {config['run_id']}")
     print(f"中文切分方式 : {zh_tokenizer_mode}")
     print(f"启用 Gloss 噪声增强 : {noise_augmentor is not None}")
+    print(f"训练文件     : {train_path.name}")
 
     train_loader = build_dataloader(train_dataset, config["train"]["batch_size"], shuffle=True)
     val_loader = build_dataloader(val_dataset, config["train"]["batch_size"], shuffle=False)
 
     encoder = build_encoder(config)
+    model_cfg = config.get("model", {})
     decoder = ChineseDecoder(
         zh_vocab_size=config["model"]["zh_vocab_size"],
         embed_dim=config["model"]["embed_dim"],
         hidden_dim=config["model"]["hidden_dim"],
         num_layers=config["model"]["num_layers"],
         dropout=config["model"]["dropout"],
+        use_word_order_attention=bool(model_cfg.get("use_word_order_attention", False)),
+        max_relative_position=int(model_cfg.get("max_relative_position", 64)),
+        use_order_guidance=bool(model_cfg.get("use_order_guidance", True)),
+        guidance_lambda_init=float(model_cfg.get("guidance_lambda_init", 1.0)),
+        guidance_decay_ratio=float(model_cfg.get("guidance_decay_ratio", 0.3)),
     )
 
     model = Seq2Seq(encoder=encoder, decoder=decoder)

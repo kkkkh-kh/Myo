@@ -1,3 +1,4 @@
+﻿import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -9,12 +10,16 @@ from data.preprocess import tokenize_gloss
 from data.vocabulary import Vocabulary
 from modules.postprocess import PostProcessor
 from modules.preorder import PreorderModule
+from modules.word_order_postprocess import DEFAULT_NEG_WORDS, DEFAULT_TIME_WORDS, WordOrderPostProcessor
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TranslationPipeline:
     """End-to-end ONNX inference pipeline."""
 
-    def __init__(self, model_dir: str, config_path: str) -> None:
+    def __init__(self, model_dir: str, config_path: str, enable_postprocess: Optional[bool] = None) -> None:
         self.model_dir = Path(model_dir)
         self.config_path = Path(config_path)
         with self.config_path.open("r", encoding="utf-8") as file:
@@ -24,8 +29,22 @@ class TranslationPipeline:
         self.memory_limit_mb = float(self.config["deploy"].get("memory_limit_mb", 60))
         self.num_layers = int(self.config["model"].get("num_layers", 2))
         self.hidden_dim = int(self.config["model"].get("hidden_dim", 256))
+
         self.preorder = PreorderModule()
         self.postprocess = PostProcessor()
+
+        postprocess_cfg = self.config.get("postprocess", {})
+        self.enable_word_order_postprocess = (
+            bool(postprocess_cfg.get("enabled", False)) if enable_postprocess is None else bool(enable_postprocess)
+        )
+        word_order_cfg = self.config.get("word_order_augment", {})
+        self.word_order_postprocess = WordOrderPostProcessor(
+            time_words=word_order_cfg.get("time_tokens", DEFAULT_TIME_WORDS),
+            neg_words=word_order_cfg.get("neg_tokens", DEFAULT_NEG_WORDS),
+            enabled_rules=postprocess_cfg.get("enabled_rules", None),
+            confidence_threshold=float(postprocess_cfg.get("confidence_threshold", 0.8)),
+        )
+
         self.gloss_vocab: Optional[Vocabulary] = None
         self.zh_vocab: Optional[Vocabulary] = None
         self.encoder_session: Optional[ort.InferenceSession] = None
@@ -122,9 +141,15 @@ class TranslationPipeline:
             predicted_ids.append(next_token)
             input_token = np.asarray([next_token], dtype=np.int64)
 
-        return self.postprocess.process(self._decode_ids(predicted_ids))
+        raw_sentence = self.postprocess.process(self._decode_ids(predicted_ids))
+        if not self.enable_word_order_postprocess:
+            return raw_sentence
+
+        final_sentence, triggered_rules = self.word_order_postprocess.process(raw_sentence, source_gloss=gloss_sequence)
+        if triggered_rules:
+            LOGGER.debug("后处理触发规则: %s", triggered_rules)
+        return final_sentence
 
     def batch_translate(self, gloss_list: List[str]) -> List[str]:
         self._ensure_loaded()
         return [self.translate(gloss) for gloss in gloss_list]
-

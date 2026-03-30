@@ -5,6 +5,11 @@
   hidden_dim: 256
   num_layers: 2
   dropout: 0.3
+  use_word_order_attention: true
+  max_relative_position: 64
+  use_order_guidance: true
+  guidance_lambda_init: 1.0
+  guidance_decay_ratio: 0.3
 
 encoder:
   use_sen: true
@@ -59,3 +64,65 @@ deploy:
   memory_limit_mb: 60
   beam_size: 1
   use_distilled: true
+
+word_order_augment:
+  enabled: true
+  augment_ratio: 4.0
+  seed: 42
+  strategies:
+    - component_swap
+    - temporal_shift
+    - negation_shift
+    - subsequence_sampling
+    - backtrans_sim
+    - synonym_replace
+  time_tokens:
+    - 昨天
+    - 今天
+    - 明天
+    - 后天
+    - 前天
+    - 上午
+    - 下午
+    - 晚上
+    - 早上
+    - 中午
+    - 刚才
+    - 现在
+    - 以前
+    - 以后
+    - 最近
+    - 去年
+    - 今年
+    - 明年
+    - 上周
+    - 下周
+  neg_tokens:
+    - 不
+    - 没
+    - 没有
+    - 别
+    - 不要
+    - 未
+    - 勿
+  synonym_dict:
+    买: 购买
+    购买: 买
+    去: 前往
+    前往: 去
+    看: 查看
+    查看: 看
+
+word_order_loss:
+  alpha_mono: 0.1
+  alpha_order: 0.05
+  warmup_epochs: 10
+
+postprocess:
+  enabled: true
+  enabled_rules:
+    - temporal_reorder
+    - negation_reorder
+    - measure_word_insert
+    - dedup
+  confidence_threshold: 0.8

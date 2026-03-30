@@ -1,13 +1,14 @@
-import csv
+﻿import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
 from tqdm import tqdm
 
+from modules.order_loss import WordOrderLoss
 from train.checkpointing import prepare_model_for_qat
 from train.evaluate import compute_bleu4, compute_rouge_l, compute_wer
 from train.loss import LabelSmoothingLoss
@@ -44,10 +45,17 @@ class Trainer:
         self.samples_path = self.save_dir / "validation_samples.jsonl"
         self.validation_sample_size = max(0, int(config["train"].get("validation_sample_size", 5)))
         self.validation_beam_size = max(1, int(config["train"].get("validation_beam_size", 1)))
+
         self.criterion = LabelSmoothingLoss(
             vocab_size=config["model"]["zh_vocab_size"],
             smoothing=config["train"].get("label_smoothing", 0.05),
             ignore_index=0,
+        )
+        word_order_cfg = config.get("word_order_loss", {})
+        self.word_order_loss = WordOrderLoss(
+            alpha_mono=float(word_order_cfg.get("alpha_mono", 0.1)),
+            alpha_order=float(word_order_cfg.get("alpha_order", 0.05)),
+            warmup_epochs=int(word_order_cfg.get("warmup_epochs", 10)),
         )
         self.qat_prepared = False
 
@@ -84,13 +92,53 @@ class Trainer:
         try:
             prepare_model_for_qat(self.model)
             self.qat_prepared = True
-            LOGGER.info("已在第 %s 轮启用 QAT 训练准备。", self.current_epoch + 1)
-        except Exception as exc:
-            LOGGER.warning("QAT 准备失败，继续普通训练：%s", exc)
+            LOGGER.info("QAT preparation enabled at epoch %s.", self.current_epoch + 1)
+        except Exception as exc:  # pragma: no cover - protective fallback.
+            LOGGER.warning("QAT preparation failed, continue normal training: %s", exc)
 
-    def _compute_loss(self, logits: torch.Tensor, zh_ids: torch.Tensor) -> torch.Tensor:
+    def _compute_ce_loss(self, logits: torch.Tensor, zh_ids: torch.Tensor) -> torch.Tensor:
         target = zh_ids[:, 1 : 1 + logits.size(1)]
         return self.criterion(logits, target)
+
+    def _forward_with_attention(
+        self,
+        gloss_ids: torch.Tensor,
+        zh_ids: torch.Tensor,
+        teacher_forcing_ratio: float,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        total_epochs = int(self.config.get("train", {}).get("epochs", 1))
+        try:
+            model_output = self.model(
+                gloss_ids,
+                zh_ids,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+                return_attention=True,
+                current_epoch=self.current_epoch,
+                total_epochs=total_epochs,
+            )
+        except TypeError:
+            logits = self.model(gloss_ids, zh_ids, teacher_forcing_ratio=teacher_forcing_ratio)
+            return logits, None
+
+        if isinstance(model_output, tuple):
+            return model_output[0], model_output[1]
+        return model_output, None
+
+    def _combine_loss(
+        self,
+        ce_loss: torch.Tensor,
+        attention_weights: Optional[torch.Tensor],
+        step_idx: int,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        if attention_weights is None:
+            return ce_loss, {"ce": float(ce_loss.detach().item()), "mono": 0.0, "order": 0.0}
+        return self.word_order_loss(
+            ce_loss=ce_loss,
+            attention_weights=attention_weights,
+            order_patterns=None,
+            current_epoch=self.current_epoch,
+            step_idx=step_idx,
+        )
 
     def train_epoch(self, dataloader: Iterable) -> float:
         self.model.train()
@@ -99,22 +147,42 @@ class Trainer:
         teacher_forcing_ratio = self._teacher_forcing_ratio()
         total_loss = 0.0
         total_batches = 0
-        progress = tqdm(dataloader, desc=f"训练第 {self.current_epoch + 1} 轮", leave=False)
+        progress = tqdm(dataloader, desc=f"Train Epoch {self.current_epoch + 1}", leave=False)
 
-        for gloss_ids, _, zh_ids, _ in progress:
+        for step_idx, batch in enumerate(progress):
+            gloss_ids, _, zh_ids, _ = batch
             gloss_ids = gloss_ids.to(self.device)
             zh_ids = zh_ids.to(self.device)
 
             self.optimizer.zero_grad(set_to_none=True)
-            logits = self.model(gloss_ids, zh_ids, teacher_forcing_ratio=teacher_forcing_ratio)
-            loss = self._compute_loss(logits, zh_ids)
+            logits, attention_weights = self._forward_with_attention(gloss_ids, zh_ids, teacher_forcing_ratio)
+            ce_loss = self._compute_ce_loss(logits, zh_ids)
+            loss, breakdown = self._combine_loss(ce_loss, attention_weights, step_idx)
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config["train"].get("clip_grad_norm", 1.0))
             self.optimizer.step()
 
             total_loss += float(loss.item())
             total_batches += 1
-            progress.set_postfix(loss=f"{loss.item():.4f}", tf=f"{teacher_forcing_ratio:.2f}")
+            progress.set_postfix(
+                total=f"{loss.item():.4f}",
+                ce=f"{breakdown['ce']:.4f}",
+                mono=f"{breakdown['mono']:.4f}",
+                order=f"{breakdown['order']:.4f}",
+                tf=f"{teacher_forcing_ratio:.2f}",
+            )
+
+            if step_idx % 50 == 0:
+                LOGGER.info(
+                    "Epoch %s Step %s | Total %.4f | CE %.4f | Mono %.4f | Order %.4f",
+                    self.current_epoch + 1,
+                    step_idx,
+                    float(loss.item()),
+                    breakdown["ce"],
+                    breakdown["mono"],
+                    breakdown["order"],
+                )
 
         return total_loss / max(1, total_batches)
 
@@ -129,15 +197,21 @@ class Trainer:
         zh_vocab = getattr(dataloader.dataset, "zh_vocab", None)
 
         with torch.no_grad():
-            progress = tqdm(dataloader, desc=f"验证第 {self.current_epoch + 1} 轮", leave=False)
-            for gloss_ids, _, zh_ids, _ in progress:
+            progress = tqdm(dataloader, desc=f"Validate Epoch {self.current_epoch + 1}", leave=False)
+            for step_idx, batch in enumerate(progress):
+                gloss_ids, _, zh_ids, _ = batch
                 gloss_ids = gloss_ids.to(self.device)
                 zh_ids = zh_ids.to(self.device)
-                logits = self.model(gloss_ids, zh_ids, teacher_forcing_ratio=0.0)
-                loss = self._compute_loss(logits, zh_ids)
+
+                logits, attention_weights = self._forward_with_attention(gloss_ids, zh_ids, teacher_forcing_ratio=0.0)
+                ce_loss = self._compute_ce_loss(logits, zh_ids)
+                loss, breakdown = self._combine_loss(ce_loss, attention_weights, step_idx)
                 total_loss += float(loss.item())
                 total_batches += 1
-                progress.set_postfix(loss=f"{loss.item():.4f}")
+                progress.set_postfix(
+                    total=f"{loss.item():.4f}",
+                    ce=f"{breakdown['ce']:.4f}",
+                )
 
                 if zh_vocab is None:
                     continue
@@ -169,11 +243,11 @@ class Trainer:
 
         average_loss = total_loss / max(1, total_batches)
         if samples:
-            print("\n===== 验证样本预览 =====")
+            print("\n===== Validation Samples =====")
             for index, sample in enumerate(samples[:3], start=1):
                 print(f"[{index}] Gloss    : {sample['gloss']}")
-                print(f"[{index}] 参考答案 : {sample['reference']}")
-                print(f"[{index}] 模型生成 : {sample['prediction']}")
+                print(f"[{index}] Reference: {sample['reference']}")
+                print(f"[{index}] Predict  : {sample['prediction']}")
                 print("---")
 
         if not hypotheses:
@@ -201,7 +275,7 @@ class Trainer:
             legacy_path = self.save_dir / f"{self.log_path.stem}.legacy_{suffix}.csv"
             suffix += 1
         self.log_path.replace(legacy_path)
-        LOGGER.info("旧版训练日志已归档到 %s", legacy_path)
+        LOGGER.info("Archived legacy training log to %s", legacy_path)
 
     def _write_log_header(self) -> None:
         self._archive_legacy_log_if_needed()
@@ -272,7 +346,7 @@ class Trainer:
                     self.scheduler.step()
 
             LOGGER.info(
-                "第 %s 轮完成：训练损失 %.4f，验证损失 %.4f，BLEU-4 %.2f，ROUGE-L %.2f，WER %.2f",
+                "Epoch %s complete: train %.4f | val %.4f | BLEU-4 %.2f | ROUGE-L %.2f | WER %.2f",
                 epoch + 1,
                 train_loss,
                 val_loss,
@@ -300,11 +374,11 @@ class Trainer:
                     },
                     best_model_path,
                 )
-                LOGGER.info("已保存最佳模型到 %s", best_model_path)
+                LOGGER.info("Saved best checkpoint to %s", best_model_path)
             else:
                 patience += 1
                 if patience >= early_stop:
-                    LOGGER.info("触发早停，训练结束。")
+                    LOGGER.info("Early stopping triggered.")
                     break
 
         return {
@@ -315,4 +389,3 @@ class Trainer:
             "best_model_path": str(best_model_path),
             "validation_samples_path": str(self.samples_path),
         }
-

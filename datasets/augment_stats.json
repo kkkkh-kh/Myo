@@ -1,0 +1,30 @@
+{
+  "original_count": 4973,
+  "target_count": 19892,
+  "augmented_count": 19892,
+  "strategy_counts": {
+    "subsequence_sampling": 5646,
+    "component_swap": 3828,
+    "backtrans_sim": 3907,
+    "temporal_shift": 713,
+    "negation_shift": 421,
+    "synonym_replace": 408
+  },
+  "order_distribution": {
+    "other": 15949,
+    "svo_like": 2252,
+    "time_front": 575,
+    "verb_tail": 818,
+    "neg_tail": 298
+  },
+  "input_path": "sign_language_translator/datasets/train.csv",
+  "output_path": "sign_language_translator/datasets/train_augmented.tsv",
+  "strategies": [
+    "component_swap",
+    "temporal_shift",
+    "negation_shift",
+    "subsequence_sampling",
+    "backtrans_sim",
+    "synonym_replace"
+  ]
+}

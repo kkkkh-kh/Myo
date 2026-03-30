@@ -1,4 +1,4 @@
-from typing import List
+﻿from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -31,10 +31,13 @@ class Seq2Seq(nn.Module):
         gloss_ids: torch.Tensor,
         zh_ids: torch.Tensor,
         teacher_forcing_ratio: float = 1.0,
-    ) -> torch.Tensor:
+        return_attention: bool = False,
+        current_epoch: int = 0,
+        total_epochs: int = 80,
+    ):
         enc_output, encoder_hidden = self.encoder(gloss_ids)
         src_mask = gloss_ids.ne(self.pad_id)
-        logits, _, _ = self.decoder(
+        logits, _, attention_history = self.decoder(
             encoder_hidden=encoder_hidden,
             enc_output=enc_output,
             src_mask=src_mask,
@@ -42,8 +45,23 @@ class Seq2Seq(nn.Module):
             teacher_forcing_ratio=teacher_forcing_ratio,
             bos_id=self.bos_id,
             eos_id=self.eos_id,
+            current_epoch=current_epoch,
+            total_epochs=total_epochs,
         )
-        return logits
+        if not return_attention:
+            return logits
+        attention_weights = self._stack_attention(attention_history, logits, gloss_ids.size(1))
+        return logits, attention_weights
+
+    def _stack_attention(
+        self,
+        attention_history: List[torch.Tensor],
+        logits: torch.Tensor,
+        src_len: int,
+    ) -> torch.Tensor:
+        if attention_history:
+            return torch.stack(attention_history, dim=1)
+        return logits.new_zeros((logits.size(0), 0, src_len))
 
     def _pad_predictions(self, predictions: torch.Tensor, max_len: int) -> torch.Tensor:
         if predictions.size(1) >= max_len:
@@ -64,6 +82,27 @@ class Seq2Seq(nn.Module):
             constrained[:, self.eos_id] = float("-inf")
         return constrained
 
+    def _decoder_forward_step(
+        self,
+        input_tokens: torch.Tensor,
+        hidden: torch.Tensor,
+        enc_output: torch.Tensor,
+        src_mask: torch.Tensor,
+        step: int,
+        total_steps: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        try:
+            return self.decoder.forward_step(
+                input_tokens,
+                hidden,
+                enc_output,
+                src_mask,
+                current_step=step,
+                total_steps=max(1, total_steps),
+            )
+        except TypeError:
+            return self.decoder.forward_step(input_tokens, hidden, enc_output, src_mask)
+
     def _greedy_translate(self, gloss_ids: torch.Tensor, max_len: int, min_len: int = 1) -> torch.Tensor:
         enc_output, encoder_hidden = self.encoder(gloss_ids)
         src_mask = gloss_ids.ne(self.pad_id)
@@ -74,7 +113,14 @@ class Seq2Seq(nn.Module):
         predictions = []
 
         for step in range(max_len):
-            logits, hidden, _ = self.decoder.forward_step(input_tokens, hidden, enc_output, src_mask)
+            logits, hidden, _ = self._decoder_forward_step(
+                input_tokens=input_tokens,
+                hidden=hidden,
+                enc_output=enc_output,
+                src_mask=src_mask,
+                step=step,
+                total_steps=max_len,
+            )
             logits = self._apply_generation_constraints(logits, step, min_len=min_len)
             next_tokens = logits.argmax(dim=-1)
             next_tokens = torch.where(finished, torch.full_like(next_tokens, self.pad_id), next_tokens)
@@ -104,7 +150,14 @@ class Seq2Seq(nn.Module):
                     candidates.append((sequence, beam_hidden, score))
                     continue
                 input_token = torch.tensor([last_token], device=gloss_ids.device)
-                logits, next_hidden, _ = self.decoder.forward_step(input_token, beam_hidden, enc_output, src_mask)
+                logits, next_hidden, _ = self._decoder_forward_step(
+                    input_tokens=input_token,
+                    hidden=beam_hidden,
+                    enc_output=enc_output,
+                    src_mask=src_mask,
+                    step=max(0, len(sequence) - 1),
+                    total_steps=max_len,
+                )
                 logits = self._apply_generation_constraints(logits, step=max(0, len(sequence) - 1), min_len=min_len)
                 log_probs = F.log_softmax(logits, dim=-1)
                 top_scores, top_indices = log_probs.topk(beam_size, dim=-1)
@@ -133,4 +186,3 @@ class Seq2Seq(nn.Module):
 
     def count_parameters(self) -> int:
         return sum(param.numel() for param in self.parameters() if param.requires_grad)
-

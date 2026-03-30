@@ -116,12 +116,18 @@ def load_model_for_export(
         transformer_heads=int(encoder_config.get("transformer_heads", 4)),
         transformer_dropout=float(encoder_config.get("transformer_dropout", 0.1)),
     )
+    model_config = config.get("model", {})
     decoder = ChineseDecoder(
         zh_vocab_size=config["model"]["zh_vocab_size"],
         embed_dim=config["model"]["embed_dim"],
         hidden_dim=config["model"]["hidden_dim"],
         num_layers=config["model"]["num_layers"],
         dropout=config["model"]["dropout"],
+        use_word_order_attention=bool(model_config.get("use_word_order_attention", False)),
+        max_relative_position=int(model_config.get("max_relative_position", 64)),
+        use_order_guidance=bool(model_config.get("use_order_guidance", True)),
+        guidance_lambda_init=float(model_config.get("guidance_lambda_init", 1.0)),
+        guidance_decay_ratio=float(model_config.get("guidance_decay_ratio", 0.3)),
     )
     model = Seq2Seq(encoder=encoder, decoder=decoder)
 

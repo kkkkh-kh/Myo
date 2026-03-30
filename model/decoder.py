@@ -1,9 +1,10 @@
-from typing import List, Optional, Tuple
+﻿from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
 
 from model.attention import BahdanauAttention
+from modules.word_order_attention import WordOrderAwareAttention
 
 
 class ChineseDecoder(nn.Module):
@@ -17,6 +18,11 @@ class ChineseDecoder(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.3,
         pad_id: int = 0,
+        use_word_order_attention: bool = False,
+        max_relative_position: int = 64,
+        use_order_guidance: bool = True,
+        guidance_lambda_init: float = 1.0,
+        guidance_decay_ratio: float = 0.3,
     ) -> None:
         super().__init__()
         self.zh_vocab_size = zh_vocab_size
@@ -24,9 +30,22 @@ class ChineseDecoder(nn.Module):
         self.num_layers = num_layers
         self.pad_id = pad_id
         self.enc_dim = hidden_dim * 2
+        self.use_word_order_attention = bool(use_word_order_attention)
 
         self.embedding = nn.Embedding(zh_vocab_size, embed_dim, padding_idx=pad_id)
-        self.attention = BahdanauAttention(enc_dim=self.enc_dim, hidden_dim=hidden_dim)
+        if self.use_word_order_attention:
+            self.attention = WordOrderAwareAttention(
+                encoder_hidden_size=self.enc_dim,
+                decoder_hidden_size=hidden_dim,
+                attention_size=hidden_dim,
+                max_relative_position=max_relative_position,
+                use_order_guidance=use_order_guidance,
+                guidance_lambda_init=guidance_lambda_init,
+                guidance_decay_ratio=guidance_decay_ratio,
+            )
+        else:
+            self.attention = BahdanauAttention(enc_dim=self.enc_dim, hidden_dim=hidden_dim)
+
         self.gru = nn.GRU(
             input_size=embed_dim + self.enc_dim,
             hidden_size=hidden_dim,
@@ -62,9 +81,25 @@ class ChineseDecoder(nn.Module):
         hidden: torch.Tensor,
         enc_output: torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
+        current_step: int = 0,
+        total_steps: int = 1,
+        current_epoch: int = 0,
+        total_epochs: int = 80,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         embedded = self.dropout(self.embedding(input_tokens)).unsqueeze(1)
-        context, attn_weights = self.attention(enc_output, hidden[-1], mask=src_mask)
+        if self.use_word_order_attention:
+            context, attn_weights = self.attention(
+                encoder_outputs=enc_output,
+                decoder_hidden=hidden[-1],
+                current_step=current_step,
+                total_steps=total_steps,
+                current_epoch=current_epoch,
+                total_epochs=total_epochs,
+                mask=src_mask,
+            )
+        else:
+            context, attn_weights = self.attention(enc_output, hidden[-1], mask=src_mask)
+
         gru_input = torch.cat([embedded, context.unsqueeze(1)], dim=-1)
         output, next_hidden = self.gru(gru_input, hidden)
         output = output.squeeze(1)
@@ -83,6 +118,8 @@ class ChineseDecoder(nn.Module):
         teacher_forcing_ratio: float = 1.0,
         bos_id: int = 1,
         eos_id: int = 2,
+        current_epoch: int = 0,
+        total_epochs: int = 80,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         hidden = self.init_hidden(encoder_hidden)
         batch_size = enc_output.size(0)
@@ -105,7 +142,16 @@ class ChineseDecoder(nn.Module):
         finished = torch.zeros(batch_size, dtype=torch.bool, device=enc_output.device)
 
         for step in range(steps):
-            logits, hidden, attn_weights = self.forward_step(input_tokens, hidden, enc_output, src_mask)
+            logits, hidden, attn_weights = self.forward_step(
+                input_tokens,
+                hidden,
+                enc_output,
+                src_mask,
+                current_step=step,
+                total_steps=steps,
+                current_epoch=current_epoch,
+                total_epochs=total_epochs,
+            )
             next_tokens = logits.argmax(dim=-1)
             logits_history.append(logits)
             predictions.append(next_tokens)
