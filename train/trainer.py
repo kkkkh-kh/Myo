@@ -43,8 +43,10 @@ class Trainer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.save_dir / "training_log.csv"
         self.samples_path = self.save_dir / "validation_samples.jsonl"
+        self.latest_model_path = self.save_dir / "latest_model.pt"
         self.validation_sample_size = max(0, int(config["train"].get("validation_sample_size", 5)))
         self.validation_beam_size = max(1, int(config["train"].get("validation_beam_size", 1)))
+        self.early_stopping_min_delta = max(0.0, float(config["train"].get("early_stopping_min_delta", 0.0)))
 
         self.criterion = LabelSmoothingLoss(
             vocab_size=config["model"]["zh_vocab_size"],
@@ -58,6 +60,71 @@ class Trainer:
             warmup_epochs=int(word_order_cfg.get("warmup_epochs", 10)),
         )
         self.qat_prepared = False
+        self.resume_state: Optional[Dict[str, Any]] = None
+
+    def _move_optimizer_state_to_device(self) -> None:
+        if self.optimizer is None:
+            return
+        for state in self.optimizer.state.values():
+            for key, value in list(state.items()):
+                if torch.is_tensor(value):
+                    state[key] = value.to(self.device)
+
+    def resume_from_checkpoint(self, checkpoint: Dict[str, Any]) -> int:
+        """Restore optimizer/scheduler and training state from a checkpoint object."""
+        if self.optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self._move_optimizer_state_to_device()
+        if self.scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        train_state = checkpoint.get("train_state", {})
+        checkpoint_val_loss = checkpoint.get("val_loss", float("inf"))
+        best_val_loss = train_state.get("best_val_loss", checkpoint_val_loss)
+        self.qat_prepared = bool(checkpoint.get("qat_prepared", self.qat_prepared))
+        self.resume_state = {
+            "start_epoch": int(checkpoint.get("epoch", 0)),
+            "best_val_loss": float(best_val_loss),
+            "best_bleu4": float(train_state.get("best_bleu4", checkpoint.get("val_bleu4", 0.0))),
+            "best_rouge_l": float(train_state.get("best_rouge_l", checkpoint.get("val_rouge_l", 0.0))),
+            "best_wer": float(train_state.get("best_wer", checkpoint.get("val_wer", 0.0))),
+            "patience": int(train_state.get("patience", 0)),
+        }
+        return int(self.resume_state["start_epoch"])
+
+    def _save_latest_checkpoint(
+        self,
+        epoch: int,
+        validation: Dict[str, Any],
+        best_val_loss: float,
+        best_bleu: float,
+        best_rouge_l: float,
+        best_wer: float,
+        patience: int,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "model_state_dict": self.model.state_dict(),
+            "config": self.config,
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "val_loss": float(validation["loss"]),
+            "val_bleu4": float(validation["bleu4"]),
+            "val_rouge_l": float(validation["rouge_l"]),
+            "val_wer": float(validation["wer"]),
+            "qat_prepared": self.qat_prepared,
+            "train_state": {
+                "best_val_loss": float(best_val_loss),
+                "best_bleu4": float(best_bleu),
+                "best_rouge_l": float(best_rouge_l),
+                "best_wer": float(best_wer),
+                "patience": int(patience),
+            },
+        }
+        if self.optimizer is not None:
+            payload["optimizer_state_dict"] = self.optimizer.state_dict()
+        if self.scheduler is not None and hasattr(self.scheduler, "state_dict"):
+            payload["scheduler_state_dict"] = self.scheduler.state_dict()
+        torch.save(payload, self.latest_model_path)
 
     def _teacher_forcing_ratio(self) -> float:
         train_cfg = self.config["train"]
@@ -318,23 +385,33 @@ class Trainer:
 
     def train(self, train_loader: Iterable, val_loader: Iterable) -> Dict[str, float]:
         self._write_log_header()
-        best_val_loss = float("inf")
-        best_bleu = 0.0
-        best_rouge_l = 0.0
-        best_wer = 0.0
-        patience = 0
-        max_epochs = self.config["train"].get("epochs", 50)
-        early_stop = self.config["train"].get("early_stopping_patience", 5)
+        resume_state = self.resume_state or {}
+        best_val_loss = float(resume_state.get("best_val_loss", float("inf")))
+        best_bleu = float(resume_state.get("best_bleu4", 0.0))
+        best_rouge_l = float(resume_state.get("best_rouge_l", 0.0))
+        best_wer = float(resume_state.get("best_wer", 0.0))
+        patience = int(resume_state.get("patience", 0))
+        start_epoch = int(resume_state.get("start_epoch", 0))
+        max_epochs = int(self.config["train"].get("epochs", 50))
+        early_stop = int(self.config["train"].get("early_stopping_patience", 5))
         best_model_path = self.save_dir / "best_model.pt"
 
-        for epoch in range(max_epochs):
+        if start_epoch > 0:
+            LOGGER.info(
+                "Resuming training from epoch %s (best_val_loss=%.6f, patience=%s)",
+                start_epoch + 1,
+                best_val_loss,
+                patience,
+            )
+
+        for epoch in range(start_epoch, max_epochs):
             self.current_epoch = epoch
             train_loss = self.train_epoch(train_loader)
             validation = self.validate(val_loader)
-            val_loss = validation["loss"]
-            val_bleu4 = validation["bleu4"]
-            val_rouge_l = validation["rouge_l"]
-            val_wer = validation["wer"]
+            val_loss = float(validation["loss"])
+            val_bleu4 = float(validation["bleu4"])
+            val_rouge_l = float(validation["rouge_l"])
+            val_wer = float(validation["wer"])
             tf_ratio = self._teacher_forcing_ratio()
             self._append_log(epoch + 1, train_loss, validation, tf_ratio)
             self._append_validation_samples(epoch + 1, validation)
@@ -355,7 +432,9 @@ class Trainer:
                 val_wer,
             )
 
-            if val_loss < best_val_loss:
+            improvement = best_val_loss - val_loss
+            is_better = improvement > self.early_stopping_min_delta
+            if is_better:
                 best_val_loss = val_loss
                 best_bleu = val_bleu4
                 best_rouge_l = val_rouge_l
@@ -364,6 +443,8 @@ class Trainer:
                 torch.save(
                     {
                         "model_state_dict": self.model.state_dict(),
+                        "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer is not None else None,
+                        "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
                         "config": self.config,
                         "run_id": self.run_id,
                         "epoch": epoch + 1,
@@ -371,15 +452,42 @@ class Trainer:
                         "val_bleu4": val_bleu4,
                         "val_rouge_l": val_rouge_l,
                         "val_wer": val_wer,
+                        "qat_prepared": self.qat_prepared,
+                        "train_state": {
+                            "best_val_loss": best_val_loss,
+                            "best_bleu4": best_bleu,
+                            "best_rouge_l": best_rouge_l,
+                            "best_wer": best_wer,
+                            "patience": patience,
+                        },
                     },
                     best_model_path,
                 )
                 LOGGER.info("Saved best checkpoint to %s", best_model_path)
             else:
                 patience += 1
-                if patience >= early_stop:
-                    LOGGER.info("Early stopping triggered.")
-                    break
+                LOGGER.info(
+                    "Validation did not improve by min_delta=%.6f (best %.6f, current %.6f), patience %s/%s",
+                    self.early_stopping_min_delta,
+                    best_val_loss,
+                    val_loss,
+                    patience,
+                    early_stop,
+                )
+
+            self._save_latest_checkpoint(
+                epoch=epoch + 1,
+                validation=validation,
+                best_val_loss=best_val_loss,
+                best_bleu=best_bleu,
+                best_rouge_l=best_rouge_l,
+                best_wer=best_wer,
+                patience=patience,
+            )
+
+            if early_stop > 0 and patience >= early_stop:
+                LOGGER.info("Early stopping triggered.")
+                break
 
         return {
             "best_val_loss": best_val_loss,
@@ -387,5 +495,6 @@ class Trainer:
             "best_rouge_l": best_rouge_l,
             "best_wer": best_wer,
             "best_model_path": str(best_model_path),
+            "latest_model_path": str(self.latest_model_path),
             "validation_samples_path": str(self.samples_path),
         }

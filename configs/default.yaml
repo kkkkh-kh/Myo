@@ -30,6 +30,8 @@ train:
   label_smoothing: 0.05
   validation_sample_size: 5
   early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+  resume_from: null
   qat_enabled: false
 
 noise_augment:

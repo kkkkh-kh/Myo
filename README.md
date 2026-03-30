@@ -225,3 +225,125 @@ python -m unittest tests.test_memory
 - 终端日志与打印信息统一使用中文。
 - 推理流程默认优先加载 `*.int8.onnx`，如不存在则回退到 FP32 ONNX。
 - `tests/` 中的端到端测试会自动导出并量化一个最小可运行模型，以保证仓库开箱可验证。
+## 12. 早停与续训（新增）
+
+当前训练流程已支持：
+- 早停（Early Stopping）
+- 断点续训（Resume Training）
+
+### 12.1 早停配置
+
+在 `configs/default.yaml` 的 `train` 段中：
+
+```yaml
+train:
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+```
+
+说明：
+- `early_stopping_patience`：验证集连续多少个 epoch 无提升后停止。
+- `early_stopping_min_delta`：判定“提升”所需的最小下降幅度（针对 `val_loss`）。
+
+### 12.2 检查点文件
+
+训练过程中会产出两个关键文件：
+- `best_model.pt`：验证集最优模型。
+- `latest_model.pt`：最近 epoch 的完整训练状态（包含模型参数、优化器、调度器、早停状态），推荐用于续训。
+
+### 12.3 使用 `scripts/train.py` 续训
+
+从最新断点自动续训：
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix AUTO_RESUME=1 python scripts/train.py
+```
+
+从指定断点续训：
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix RESUME_FROM=./checkpoints/word_order_mix/latest_model.pt python scripts/train.py
+```
+
+也可在配置中指定（优先级低于环境变量）：
+
+```yaml
+train:
+  resume_from: null
+```
+
+### 12.4 使用 `scripts/train.sh` 续训
+
+`scripts/train.sh` 现支持以下变量：
+- `RESUME_FROM`：指定 checkpoint 路径。
+- `AUTO_RESUME=1`：自动读取 `OUTPUT_DIR/latest_model.pt`。
+- `SKIP_AUGMENT=1`：续训时跳过数据增强预处理步骤。
+
+示例：
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix SKIP_AUGMENT=1 RESUME_FROM=./checkpoints/word_order_mix/latest_model.pt bash scripts/train.sh
+```
+
+### 12.5 续训建议
+
+- 优先用 `latest_model.pt` 续训，能完整恢复优化器与学习率调度状态。
+- 若仅有 `best_model.pt`，也可继续训练，但优化器状态可能无法完整恢复。
+- 续训时建议保持与上次训练一致的 `OUTPUT_DIR`、词表和配置。
+
+## 13. Early Stopping and Resume (Plain ASCII)
+
+Training now supports both early stopping and checkpoint resume.
+
+### Config keys
+
+In `configs/default.yaml`:
+
+```yaml
+train:
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+  resume_from: null
+```
+
+- `early_stopping_patience`: stop when validation loss does not improve for N epochs.
+- `early_stopping_min_delta`: minimum `val_loss` decrease to count as an improvement.
+- `resume_from`: optional checkpoint path from config (env vars still override).
+
+### Checkpoints
+
+- `best_model.pt`: best validation checkpoint.
+- `latest_model.pt`: latest full training state (model + optimizer + scheduler + patience), recommended for resume.
+
+### Resume with `scripts/train.py`
+
+Auto-resume from `OUTPUT_DIR/latest_model.pt`:
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix AUTO_RESUME=1 python scripts/train.py
+```
+
+Resume from explicit checkpoint:
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix RESUME_FROM=./checkpoints/word_order_mix/latest_model.pt python scripts/train.py
+```
+
+### Resume with `scripts/train.sh`
+
+Supported env vars:
+- `RESUME_FROM`
+- `AUTO_RESUME=1`
+- `SKIP_AUGMENT=1`
+
+Example:
+
+```bash
+cd sign_language_translator
+CUDA_VISIBLE_DEVICES=0 OUTPUT_DIR=./checkpoints/word_order_mix SKIP_AUGMENT=1 RESUME_FROM=./checkpoints/word_order_mix/latest_model.pt bash scripts/train.sh
+```

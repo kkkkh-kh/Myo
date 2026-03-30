@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import torch
 import yaml
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -27,6 +28,7 @@ from data.vocabulary import Vocabulary
 from model.decoder import ChineseDecoder
 from model.encoder import GlossEncoder
 from model.seq2seq import Seq2Seq
+from train.checkpointing import load_checkpoint_into_model
 from train.trainer import Trainer
 
 
@@ -53,6 +55,57 @@ def resolve_train_path(data_dir: Path, config: dict) -> Path:
                 return path
 
     return resolve_dataset_path(data_dir, "train.tsv", "train.csv")
+
+
+def _candidate_paths(raw_path: str, *roots: Path) -> list[Path]:
+    base = Path(raw_path)
+    candidates: list[Path] = [base]
+    for root in roots:
+        if not base.is_absolute():
+            candidates.append(root / base)
+    if base.parts and base.parts[0].lower() == "myo" and len(base.parts) > 1:
+        stripped = Path(*base.parts[1:])
+        for root in roots:
+            candidates.append(root / stripped)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def resolve_resume_path(root_dir: Path, output_dir: Path, config: dict) -> Optional[Path]:
+    configured = config.get("train", {}).get("resume_from")
+    resume_value = os.environ.get("RESUME_FROM") or configured
+    if resume_value:
+        for candidate in _candidate_paths(str(resume_value), output_dir, root_dir, Path.cwd()):
+            if candidate.exists():
+                return candidate.resolve()
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_value}")
+
+    if os.environ.get("AUTO_RESUME", "0") == "1":
+        auto_path = output_dir / "latest_model.pt"
+        if auto_path.exists():
+            return auto_path.resolve()
+    return None
+
+
+def load_or_build_vocabularies(
+    train_path: Path,
+    config: dict,
+    checkpoint_dir: Optional[Path] = None,
+) -> tuple[Vocabulary, Vocabulary]:
+    if checkpoint_dir is not None:
+        gloss_path = checkpoint_dir / "gloss_vocab.json"
+        zh_path = checkpoint_dir / "zh_vocab.json"
+        if gloss_path.exists() and zh_path.exists():
+            return Vocabulary.load(gloss_path), Vocabulary.load(zh_path)
+    return build_vocabularies(train_path, config)
 
 
 def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Vocabulary]:
@@ -123,15 +176,24 @@ def main() -> None:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
 
+    resume_path = resolve_resume_path(ROOT_DIR, OUTPUT_DIR, config)
+    resume_checkpoint = None
+    if resume_path is not None:
+        resume_checkpoint = torch.load(resume_path.as_posix(), map_location="cpu")
+        print(f"Resume checkpoint: {resume_path}")
+
     train_path = resolve_train_path(DATA_DIR, config)
     val_path = resolve_dataset_path(DATA_DIR, "val.tsv", "dev.tsv", "val.csv", "dev.csv")
 
-    config["run_id"] = os.environ.get("RUN_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    default_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resumed_run_id = str(resume_checkpoint.get("run_id", "")) if isinstance(resume_checkpoint, dict) else ""
+    config["run_id"] = os.environ.get("RUN_ID") or resumed_run_id or default_run_id
     config["save_dir"] = OUTPUT_DIR.resolve().as_posix()
     config["project_root"] = ROOT_DIR.resolve().as_posix()
     zh_tokenizer_mode = config.get("data", {}).get("zh_tokenizer", "char")
 
-    gloss_vocab, zh_vocab = build_vocabularies(train_path, config)
+    resume_vocab_dir = resume_path.parent if resume_path is not None else None
+    gloss_vocab, zh_vocab = load_or_build_vocabularies(train_path, config, checkpoint_dir=resume_vocab_dir)
     gloss_vocab.save(OUTPUT_DIR / "gloss_vocab.json")
     zh_vocab.save(OUTPUT_DIR / "zh_vocab.json")
 
@@ -168,6 +230,7 @@ def main() -> None:
     print(f"中文切分方式 : {zh_tokenizer_mode}")
     print(f"启用 Gloss 噪声增强 : {noise_augmentor is not None}")
     print(f"训练文件     : {train_path.name}")
+    print(f"Resume mode : {resume_path is not None}")
 
     train_loader = build_dataloader(train_dataset, config["train"]["batch_size"], shuffle=True)
     val_loader = build_dataloader(val_dataset, config["train"]["batch_size"], shuffle=False)
@@ -191,6 +254,12 @@ def main() -> None:
     optimizer = AdamW(model.parameters(), lr=config["train"]["learning_rate"])
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
     trainer = Trainer(model=model, optimizer=optimizer, scheduler=scheduler, config=config)
+
+    if resume_checkpoint is not None:
+        load_checkpoint_into_model(model, resume_checkpoint, map_location="cpu")
+        resumed_epoch = trainer.resume_from_checkpoint(resume_checkpoint)
+        print(f"Resume state restored, continue from epoch {resumed_epoch + 1}")
+
     result = trainer.train(train_loader, val_loader)
 
     print(
@@ -198,6 +267,7 @@ def main() -> None:
         "ROUGE-L：{best_rouge_l:.2f}，WER：{best_wer:.2f}".format(**result)
     )
     print(f"最佳模型路径：{result['best_model_path']}")
+    print(f"Latest checkpoint: {result.get('latest_model_path', OUTPUT_DIR / 'latest_model.pt')}")
     print(f"验证样例日志：{result['validation_samples_path']}")
 
 

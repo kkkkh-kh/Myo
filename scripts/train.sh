@@ -8,6 +8,9 @@ AUGMENT_RATIO="${AUGMENT_RATIO:-4.0}"
 TRAIN_FILE="${TRAIN_FILE:-train_augmented.tsv}"
 CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/default.yaml}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+RESUME_FROM="${RESUME_FROM:-}"
+AUTO_RESUME="${AUTO_RESUME:-0}"
+SKIP_AUGMENT="${SKIP_AUGMENT:-0}"
 
 if [[ ! -f "$DATA_DIR/train.tsv" && ! -f "$DATA_DIR/train.csv" ]]; then
   echo "未找到训练数据（train.tsv/train.csv）。" >&2
@@ -30,17 +33,20 @@ if [[ ! -f "$VAL_FILE" ]]; then
   fi
 fi
 
-echo "===== Step 0: 语序数据增强预处理 ====="
-cd "$ROOT_DIR"
-"$PYTHON_BIN" datasets/preprocess_augment.py \
-  --input "$INPUT_TRAIN" \
-  --output "$DATA_DIR/$TRAIN_FILE" \
-  --augment_ratio "$AUGMENT_RATIO" \
-  --seed 42 \
-  --config "$CONFIG_PATH"
+if [[ "$SKIP_AUGMENT" == "1" ]]; then
+  echo "===== Step 0: skip data augmentation (SKIP_AUGMENT=1) ====="
+else
+  echo "===== Step 0: data augmentation preprocess ====="
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" datasets/preprocess_augment.py \
+    --input "$INPUT_TRAIN" \
+    --output "$DATA_DIR/$TRAIN_FILE" \
+    --augment_ratio "$AUGMENT_RATIO" \
+    --seed 42 \
+    --config "$CONFIG_PATH"
 
-echo "增强数据统计："
-"$PYTHON_BIN" -c "
+  echo "augmentation stats:"
+  "$PYTHON_BIN" -c "
 import json
 from pathlib import Path
 stats_path = Path('$DATA_DIR') / 'augment_stats.json'
@@ -48,11 +54,12 @@ if not stats_path.exists():
     print('  augment_stats.json not found')
 else:
     stats = json.loads(stats_path.read_text(encoding='utf-8'))
-    print(f'  原始样本: {stats.get(\"original_count\", 0)} 条')
-    print(f'  增强后: {stats.get(\"augmented_count\", 0)} 条')
+    print(f'  original_count: {stats.get("original_count", 0)}')
+    print(f'  augmented_count: {stats.get("augmented_count", 0)}')
     for k, v in stats.get('strategy_counts', {}).items():
-        print(f'  {k}: +{v} 条')
+        print(f'  {k}: +{v}')
 "
+fi
 
 echo "===== Step 1: 训练（使用增强数据集） ====="
 ROOT_DIR="$ROOT_DIR" \
@@ -60,6 +67,8 @@ DATA_DIR="$DATA_DIR" \
 TRAIN_FILE="$TRAIN_FILE" \
 OUTPUT_DIR="$OUTPUT_DIR" \
 CONFIG_PATH="$CONFIG_PATH" \
+RESUME_FROM="$RESUME_FROM" \
+AUTO_RESUME="$AUTO_RESUME" \
 "$PYTHON_BIN" scripts/train.py
 
 EVAL_INPUT="$VAL_FILE"
