@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import re
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
@@ -36,6 +36,7 @@ ASCII_TO_FULLWIDTH_PUNCTUATION = {
 
 SPACE_PATTERN = re.compile(r"\s+")
 PUNCTUATION_TOKENS = {",", ".", ";", ":", "!", "?", "(", ")", "[", "]"}
+LEADING_DIGITS_PATTERN = re.compile(r"^(\d+)(.+)$")
 
 
 def normalize_punctuation(text: str) -> str:
@@ -58,6 +59,51 @@ def clean_chinese_text(text: str) -> str:
     return SPACE_PATTERN.sub(" ", text).strip()
 
 
+def merge_number_tokens(tokens: Sequence[str]) -> List[str]:
+    """Merge adjacent numeric gloss tokens into one token.
+
+    Examples:
+      ['2', '0', '2', '3'] -> ['2023']
+      ['2', '0', '2', '3年'] -> ['2023', '年']
+      ['1', '0', '0', '0', '万'] -> ['1000', '万']
+    """
+    merged: List[str] = []
+    buffer: List[str] = []
+
+    def flush_buffer() -> None:
+        nonlocal buffer
+        if buffer:
+            merged.append("".join(buffer))
+            buffer = []
+
+    for token in tokens:
+        if not token:
+            continue
+
+        if re.fullmatch(r"\d+", token):
+            buffer.append(token)
+            continue
+
+        # Handle attached suffix such as "3年":
+        # when a numeric buffer exists, merge the leading digits first.
+        leading_match = LEADING_DIGITS_PATTERN.match(token)
+        if leading_match is not None:
+            leading_digits, suffix = leading_match.groups()
+            if buffer:
+                buffer.append(leading_digits)
+                flush_buffer()
+                if suffix.strip():
+                    merged.append(suffix)
+                continue
+            # Without an active buffer, keep the original token unchanged.
+
+        flush_buffer()
+        merged.append(token)
+
+    flush_buffer()
+    return merged
+
+
 def tokenize_gloss(text: str) -> List[str]:
     cleaned = clean_gloss_text(text)
     tokens = cleaned.split() if cleaned else []
@@ -69,7 +115,8 @@ def tokenize_chinese(text: str, mode: str = "char") -> List[str]:
     if not cleaned:
         return []
     if mode == "char":
-        return [char for char in cleaned if not char.isspace()]
+        chars = [char for char in cleaned if not char.isspace()]
+        return merge_number_tokens(chars) 
     if mode != "jieba":
         raise ValueError(f"Unsupported Chinese tokenization mode: {mode}")
 
@@ -79,7 +126,7 @@ def tokenize_chinese(text: str, mode: str = "char") -> List[str]:
             pieces.append(piece)
         else:
             pieces.extend(token for token in jieba.lcut(piece, cut_all=False) if token.strip())
-    return pieces
+    return merge_number_tokens(pieces)
 
 
 def detokenize_chinese(tokens: Sequence[str]) -> str:
@@ -184,28 +231,3 @@ def extract_corpora(
         gloss_texts.append(tokenize_gloss(gloss))
         chinese_texts.append(tokenize_chinese(chinese, mode=zh_tokenizer_mode))
     return gloss_texts, chinese_texts
-
-import re
-
-def merge_number_tokens(tokens: list[str]) -> list[str]:
-    """
-    将连续的数字 token 合并为一个整体 token。
-    例如：['2', '0', '2', '3'] → ['2023']
-         ['1', '0', '0', '0', '万'] → ['1000', '万']  # 非数字不合并
-    """
-    merged = []
-    buffer = []
-
-    for token in tokens:
-        if re.fullmatch(r'\d+', token):   # 纯数字 token
-            buffer.append(token)
-        else:
-            if buffer:
-                merged.append("".join(buffer))  # 合并缓冲区
-                buffer = []
-            merged.append(token)
-
-    if buffer:
-        merged.append("".join(buffer))  # 处理末尾残留
-
-    return merged

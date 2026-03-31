@@ -1,5 +1,7 @@
-﻿import os
+import os
+import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -100,6 +102,23 @@ def resolve_resume_path(root_dir: Path, output_dir: Path, config: dict) -> Optio
     return None
 
 
+def _collect_numeric_gloss_tokens(gloss_corpus: list[list[str]]) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for tokens in gloss_corpus:
+        for token in tokens:
+            if re.fullmatch(r"\d{2,}", token):
+                counter[token] += 1
+    return counter
+
+
+def _top_numeric_tokens(counter: Counter[str], min_freq: int, top_k: int) -> list[str]:
+    if top_k <= 0:
+        return []
+    filtered = [(token, freq) for token, freq in counter.items() if freq >= min_freq]
+    filtered.sort(key=lambda item: (-item[1], item[0]))
+    return [token for token, _ in filtered[:top_k]]
+
+
 def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Vocabulary]:
     train_pairs = read_parallel_pairs(train_path.as_posix())
     zh_tokenizer_mode = config.get("data", {}).get("zh_tokenizer", "char")
@@ -107,6 +126,16 @@ def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Voca
 
     gloss_vocab = Vocabulary()
     gloss_vocab.build_from_corpus(gloss_corpus, max_size=config["model"]["gloss_vocab_size"])
+
+    train_cfg = config.get("train", {})
+    force_numeric = bool(train_cfg.get("force_include_numeric_tokens", True))
+    min_numeric_freq = max(1, int(train_cfg.get("min_numeric_token_frequency", 1)))
+    max_numeric_tokens = max(0, int(train_cfg.get("max_forced_numeric_tokens", 512)))
+    if force_numeric and max_numeric_tokens > 0:
+        numeric_counter = _collect_numeric_gloss_tokens(gloss_corpus)
+        for token in _top_numeric_tokens(numeric_counter, min_freq=min_numeric_freq, top_k=max_numeric_tokens):
+            gloss_vocab.add_token(token)
+
     zh_vocab = Vocabulary()
     zh_vocab.build_from_corpus(zh_corpus, max_size=config["model"]["zh_vocab_size"])
     return gloss_vocab, zh_vocab
@@ -309,6 +338,13 @@ def main() -> None:
     print(f"中文切分方式 : {zh_tokenizer_mode}")
     print(f"启用 Gloss 噪声增强 : {noise_augmentor is not None}")
     print(f"训练文件     : {train_path.name}")
+    numeric_vocab_tokens = sorted(
+        [token for token in gloss_vocab.token_to_id.keys() if re.fullmatch(r"\d{2,}", token)],
+        key=lambda item: (len(item), item),
+    )
+    print(f"Numeric gloss tokens (len>=2): {len(numeric_vocab_tokens)}")
+    if numeric_vocab_tokens:
+        print("Numeric token samples      : " + ", ".join(numeric_vocab_tokens[:10]))
     print(f"Vocab source: {vocab_source}")
     print(f"Resume mode : {resume_checkpoint is not None}")
 

@@ -1,4 +1,4 @@
-﻿model:
+model:
   gloss_vocab_size: 4000
   zh_vocab_size: 8000
   embed_dim: 128
@@ -33,6 +33,9 @@ train:
   early_stopping_min_delta: 0.0
   resume_from: null
   reuse_checkpoint_vocab: false
+  force_include_numeric_tokens: true
+  min_numeric_token_frequency: 1
+  max_forced_numeric_tokens: 512
   qat_enabled: false
 
 noise_augment:
