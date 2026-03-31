@@ -2,7 +2,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import yaml
@@ -37,9 +37,7 @@ def resolve_dataset_path(data_dir: Path, *candidates: str) -> Path:
         path = data_dir / candidate
         if path.exists():
             return path
-    raise FileNotFoundError(
-        f"未找到数据文件，尝试过：{', '.join(str(data_dir / candidate) for candidate in candidates)}"
-    )
+    raise FileNotFoundError(f"Missing dataset file, tried: {', '.join(str(data_dir / c) for c in candidates)}")
 
 
 def resolve_train_path(data_dir: Path, config: dict) -> Path:
@@ -79,6 +77,13 @@ def _candidate_paths(raw_path: str, *roots: Path) -> list[Path]:
     return unique
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def resolve_resume_path(root_dir: Path, output_dir: Path, config: dict) -> Optional[Path]:
     configured = config.get("train", {}).get("resume_from")
     resume_value = os.environ.get("RESUME_FROM") or configured
@@ -88,24 +93,11 @@ def resolve_resume_path(root_dir: Path, output_dir: Path, config: dict) -> Optio
                 return candidate.resolve()
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_value}")
 
-    if os.environ.get("AUTO_RESUME", "0") == "1":
+    if _env_flag("AUTO_RESUME", default=False):
         auto_path = output_dir / "latest_model.pt"
         if auto_path.exists():
             return auto_path.resolve()
     return None
-
-
-def load_or_build_vocabularies(
-    train_path: Path,
-    config: dict,
-    checkpoint_dir: Optional[Path] = None,
-) -> tuple[Vocabulary, Vocabulary]:
-    if checkpoint_dir is not None:
-        gloss_path = checkpoint_dir / "gloss_vocab.json"
-        zh_path = checkpoint_dir / "zh_vocab.json"
-        if gloss_path.exists() and zh_path.exists():
-            return Vocabulary.load(gloss_path), Vocabulary.load(zh_path)
-    return build_vocabularies(train_path, config)
 
 
 def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Vocabulary]:
@@ -118,6 +110,63 @@ def build_vocabularies(train_path: Path, config: dict) -> tuple[Vocabulary, Voca
     zh_vocab = Vocabulary()
     zh_vocab.build_from_corpus(zh_corpus, max_size=config["model"]["zh_vocab_size"])
     return gloss_vocab, zh_vocab
+
+
+def load_or_build_vocabularies(
+    train_path: Path,
+    config: dict,
+    checkpoint_dir: Optional[Path] = None,
+    reuse_checkpoint_vocab: bool = False,
+) -> tuple[Vocabulary, Vocabulary, str]:
+    if reuse_checkpoint_vocab and checkpoint_dir is not None:
+        gloss_path = checkpoint_dir / "gloss_vocab.json"
+        zh_path = checkpoint_dir / "zh_vocab.json"
+        if gloss_path.exists() and zh_path.exists():
+            return Vocabulary.load(gloss_path), Vocabulary.load(zh_path), "checkpoint"
+
+    gloss_vocab, zh_vocab = build_vocabularies(train_path, config)
+    return gloss_vocab, zh_vocab, "train_data"
+
+
+def _checkpoint_vocab_sizes(checkpoint: dict) -> Tuple[Optional[int], Optional[int]]:
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    gloss_size: Optional[int] = None
+    zh_size: Optional[int] = None
+
+    if isinstance(state_dict, dict):
+        gloss_weight = state_dict.get("encoder.embedding.weight")
+        zh_weight = state_dict.get("decoder.embedding.weight")
+        if torch.is_tensor(gloss_weight):
+            gloss_size = int(gloss_weight.size(0))
+        if torch.is_tensor(zh_weight):
+            zh_size = int(zh_weight.size(0))
+
+    if gloss_size is None or zh_size is None:
+        cfg = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        if gloss_size is None and "gloss_vocab_size" in model_cfg:
+            gloss_size = int(model_cfg["gloss_vocab_size"])
+        if zh_size is None and "zh_vocab_size" in model_cfg:
+            zh_size = int(model_cfg["zh_vocab_size"])
+
+    return gloss_size, zh_size
+
+
+def resume_checkpoint_matches_vocab(
+    checkpoint: dict,
+    gloss_vocab_size: int,
+    zh_vocab_size: int,
+) -> tuple[bool, str]:
+    ckpt_gloss, ckpt_zh = _checkpoint_vocab_sizes(checkpoint)
+    if ckpt_gloss is None or ckpt_zh is None:
+        return True, "checkpoint vocab size unavailable"
+    if ckpt_gloss != gloss_vocab_size or ckpt_zh != zh_vocab_size:
+        return (
+            False,
+            f"checkpoint vocab mismatch (checkpoint: gloss={ckpt_gloss}, zh={ckpt_zh}; "
+            f"current: gloss={gloss_vocab_size}, zh={zh_vocab_size})",
+        )
+    return True, "checkpoint vocab size matched"
 
 
 def build_dataloader(dataset: GlossChineseDataset, batch_size: int, shuffle: bool) -> DataLoader:
@@ -176,6 +225,21 @@ def main() -> None:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
 
+    config.setdefault("train", {})
+    config.setdefault("model", {})
+    config.setdefault("data", {})
+
+    explicit_run_id = os.environ.get("RUN_ID")
+    default_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    config["run_id"] = explicit_run_id or default_run_id
+    config["save_dir"] = OUTPUT_DIR.resolve().as_posix()
+    config["project_root"] = ROOT_DIR.resolve().as_posix()
+
+    reuse_checkpoint_vocab = _env_flag(
+        "REUSE_CHECKPOINT_VOCAB",
+        default=bool(config.get("train", {}).get("reuse_checkpoint_vocab", False)),
+    )
+
     resume_path = resolve_resume_path(ROOT_DIR, OUTPUT_DIR, config)
     resume_checkpoint = None
     if resume_path is not None:
@@ -184,16 +248,31 @@ def main() -> None:
 
     train_path = resolve_train_path(DATA_DIR, config)
     val_path = resolve_dataset_path(DATA_DIR, "val.tsv", "dev.tsv", "val.csv", "dev.csv")
-
-    default_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    resumed_run_id = str(resume_checkpoint.get("run_id", "")) if isinstance(resume_checkpoint, dict) else ""
-    config["run_id"] = os.environ.get("RUN_ID") or resumed_run_id or default_run_id
-    config["save_dir"] = OUTPUT_DIR.resolve().as_posix()
-    config["project_root"] = ROOT_DIR.resolve().as_posix()
     zh_tokenizer_mode = config.get("data", {}).get("zh_tokenizer", "char")
 
     resume_vocab_dir = resume_path.parent if resume_path is not None else None
-    gloss_vocab, zh_vocab = load_or_build_vocabularies(train_path, config, checkpoint_dir=resume_vocab_dir)
+    gloss_vocab, zh_vocab, vocab_source = load_or_build_vocabularies(
+        train_path,
+        config,
+        checkpoint_dir=resume_vocab_dir,
+        reuse_checkpoint_vocab=reuse_checkpoint_vocab,
+    )
+
+    if resume_checkpoint is not None:
+        compatible, reason = resume_checkpoint_matches_vocab(
+            resume_checkpoint,
+            gloss_vocab_size=len(gloss_vocab),
+            zh_vocab_size=len(zh_vocab),
+        )
+        if not compatible:
+            print(f"Resume disabled: {reason}")
+            resume_checkpoint = None
+            resume_path = None
+        elif not explicit_run_id:
+            resumed_run_id = str(resume_checkpoint.get("run_id", "")).strip()
+            if resumed_run_id:
+                config["run_id"] = resumed_run_id
+
     gloss_vocab.save(OUTPUT_DIR / "gloss_vocab.json")
     zh_vocab.save(OUTPUT_DIR / "zh_vocab.json")
 
@@ -230,7 +309,8 @@ def main() -> None:
     print(f"中文切分方式 : {zh_tokenizer_mode}")
     print(f"启用 Gloss 噪声增强 : {noise_augmentor is not None}")
     print(f"训练文件     : {train_path.name}")
-    print(f"Resume mode : {resume_path is not None}")
+    print(f"Vocab source: {vocab_source}")
+    print(f"Resume mode : {resume_checkpoint is not None}")
 
     train_loader = build_dataloader(train_dataset, config["train"]["batch_size"], shuffle=True)
     val_loader = build_dataloader(val_dataset, config["train"]["batch_size"], shuffle=False)
