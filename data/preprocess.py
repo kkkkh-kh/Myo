@@ -60,7 +60,8 @@ def clean_chinese_text(text: str) -> str:
 
 def tokenize_gloss(text: str) -> List[str]:
     cleaned = clean_gloss_text(text)
-    return cleaned.split() if cleaned else []
+    tokens = cleaned.split() if cleaned else []
+    return merge_number_tokens(tokens)
 
 
 def tokenize_chinese(text: str, mode: str = "char") -> List[str]:
@@ -183,3 +184,28 @@ def extract_corpora(
         gloss_texts.append(tokenize_gloss(gloss))
         chinese_texts.append(tokenize_chinese(chinese, mode=zh_tokenizer_mode))
     return gloss_texts, chinese_texts
+
+import re
+
+def merge_number_tokens(tokens: list[str]) -> list[str]:
+    """
+    将连续的数字 token 合并为一个整体 token。
+    例如：['2', '0', '2', '3'] → ['2023']
+         ['1', '0', '0', '0', '万'] → ['1000', '万']  # 非数字不合并
+    """
+    merged = []
+    buffer = []
+
+    for token in tokens:
+        if re.fullmatch(r'\d+', token):   # 纯数字 token
+            buffer.append(token)
+        else:
+            if buffer:
+                merged.append("".join(buffer))  # 合并缓冲区
+                buffer = []
+            merged.append(token)
+
+    if buffer:
+        merged.append("".join(buffer))  # 处理末尾残留
+
+    return merged

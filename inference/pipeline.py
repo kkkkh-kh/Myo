@@ -6,7 +6,7 @@ import numpy as np
 import onnxruntime as ort
 import yaml
 
-from data.preprocess import tokenize_gloss
+from data.preprocess import tokenize_gloss,merge_number_tokens
 from data.vocabulary import Vocabulary
 from modules.postprocess import PostProcessor
 from modules.preorder import PreorderModule
@@ -88,7 +88,9 @@ class TranslationPipeline:
         )
 
     def _prepare_gloss_ids(self, gloss_sequence: str) -> np.ndarray:
-        tokens = self.preorder.reorder(tokenize_gloss(gloss_sequence))
+        tokens = tokenize_gloss(gloss_sequence)
+        tokens = merge_number_tokens(gloss_sequence)
+        tokens = self.preorder.reorder(tokens)
         token_ids = self.gloss_vocab.encode(tokens, add_eos=True)[: self.max_seq_len]
         if not token_ids:
             token_ids = [Vocabulary.EOS_ID]
@@ -107,12 +109,32 @@ class TranslationPipeline:
                 tokens.append(Vocabulary.UNK_TOKEN)
         return tokens
 
-    def _apply_generation_constraints(self, logits: np.ndarray, step: int) -> np.ndarray:
+    def _apply_generation_constraints(
+            self, 
+            logits: np.ndarray, 
+            step: int,
+            predicted_ids:Optional[List[int]]=None,
+            repetition_penalty:float=1.3,
+            no_repeat_ngram_size:int =3
+            ) -> np.ndarray:
         constrained = np.array(logits, copy=True)
         constrained[..., Vocabulary.PAD_ID] = -np.inf
         constrained[..., Vocabulary.BOS_ID] = -np.inf
         if step < 1:
             constrained[..., Vocabulary.EOS_ID] = -np.inf
+        if predicted_ids:
+            if repetition_penalty != 1.0:
+                for token_id in set(predicted_ids):
+                    if constrained[..., token_id] > 0:
+                        constrained[..., token_id] /= repetition_penalty
+                    else:
+                        constrained[..., token_id] *= repetition_penalty
+            if no_repeat_ngram_size > 1 and len(predicted_ids) >= no_repeat_ngram_size - 1:
+                ngram_prefix = tuple(predicted_ids[-(no_repeat_ngram_size - 1):])
+                for i in range(len(predicted_ids) - no_repeat_ngram_size + 1):
+                    if tuple(predicted_ids[i:i + no_repeat_ngram_size - 1]) == ngram_prefix:
+                        banned_token = predicted_ids[i + no_repeat_ngram_size - 1]
+                        constrained[..., banned_token] = -np.inf
         return constrained
 
     def translate(self, gloss_sequence: str) -> str:
@@ -134,7 +156,13 @@ class TranslationPipeline:
                     "src_mask": src_mask,
                 },
             )
-            constrained_logits = self._apply_generation_constraints(logits, step)
+            constrained_logits = self._apply_generation_constraints(
+            logits,
+            step,
+            predicted_ids=predicted_ids,
+            repetition_penalty=1.3,
+            no_repeat_ngram_size=3,
+        )
             next_token = int(np.argmax(constrained_logits, axis=-1)[0])
             if next_token == Vocabulary.EOS_ID:
                 break
