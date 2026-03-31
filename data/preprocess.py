@@ -221,13 +221,18 @@ def read_tsv_pairs(path: str) -> List[Tuple[str, str]]:
     return read_parallel_pairs(path)
 
 
-def extract_corpora(
-    pairs: Iterable[Tuple[str, str]],
-    zh_tokenizer_mode: str = "char",
-) -> Tuple[List[List[str]], List[List[str]]]:
-    gloss_texts: List[List[str]] = []
-    chinese_texts: List[List[str]] = []
-    for gloss, chinese in pairs:
-        gloss_texts.append(tokenize_gloss(gloss))
-        chinese_texts.append(tokenize_chinese(chinese, mode=zh_tokenizer_mode))
+# 在 extract_corpora 里临时加一行 debug
+def extract_corpora(pairs, zh_tokenizer_mode="char"):
+    gloss_texts, chinese_texts = [], []
+    for i, (gloss, chinese) in enumerate(pairs):
+        g_tokens = tokenize_gloss(gloss)
+        c_tokens = tokenize_chinese(chinese, mode=zh_tokenizer_mode)
+        if i < 3:
+            print(f"[DEBUG] gloss raw: {gloss!r}")
+            print(f"[DEBUG] gloss tokens: {g_tokens}")
+            print(f"[DEBUG] chinese raw: {chinese!r}")
+            print(f"[DEBUG] chinese tokens: {c_tokens}")
+            print("---")
+        gloss_texts.append(g_tokens)
+        chinese_texts.append(c_tokens)
     return gloss_texts, chinese_texts

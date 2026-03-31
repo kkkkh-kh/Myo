@@ -22,7 +22,7 @@ encoder:
 train:
   batch_size: 64
   learning_rate: 3.0e-4
-  epochs: 50
+  epochs: 500
   teacher_forcing_ratio_start: 1.0
   teacher_forcing_ratio_end: 0.5
   teacher_forcing_decay_epochs: 12
