@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,19 +47,19 @@ else
     --config "$CONFIG_PATH"
 
   echo "augmentation stats:"
-  "$PYTHON_BIN" -c "
+  "$PYTHON_BIN" - <<PY
 import json
 from pathlib import Path
-stats_path = Path('$DATA_DIR') / 'augment_stats.json'
+stats_path = Path("$DATA_DIR") / "augment_stats.json"
 if not stats_path.exists():
-    print('  augment_stats.json not found')
+    print("  augment_stats.json not found")
 else:
-    stats = json.loads(stats_path.read_text(encoding='utf-8'))
-    print(f'  original_count: {stats.get("original_count", 0)}')
-    print(f'  augmented_count: {stats.get("augmented_count", 0)}')
-    for k, v in stats.get('strategy_counts', {}).items():
-        print(f'  {k}: +{v}')
-"
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    print(f"  original_count: {stats.get('original_count', 0)}")
+    print(f"  augmented_count: {stats.get('augmented_count', 0)}")
+    for k, v in stats.get("strategy_counts", {}).items():
+        print(f"  {k}: +{v}")
+PY
 fi
 
 echo "===== Step 1: 训练（使用增强数据集） ====="
