@@ -1,8 +1,8 @@
-﻿# Module description: Word-order-aware attention with relative-position bias and soft guidance prior.
+# Module description: Word-order-aware attention with relative-position bias and soft guidance prior.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 from torch import nn
@@ -53,6 +53,12 @@ class WordOrderAwareAttention(nn.Module):
         nn.init.xavier_uniform_(self.energy_projection.weight)
         nn.init.zeros_(self.relative_bias.weight)
 
+    @staticmethod
+    def _as_scalar_tensor(value: Union[int, torch.Tensor], *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if torch.is_tensor(value):
+            return value.to(device=device, dtype=dtype).reshape(())
+        return torch.tensor(float(value), device=device, dtype=dtype)
+
     def update_guidance_lambda(self, current_epoch: int, total_epochs: int) -> None:
         """Update guidance strength using a front-loaded linear decay schedule."""
         if not self.use_order_guidance:
@@ -69,8 +75,8 @@ class WordOrderAwareAttention(nn.Module):
         self,
         encoder_outputs: torch.Tensor,
         decoder_hidden: torch.Tensor,
-        current_step: int = 0,
-        total_steps: int = 1,
+        current_step: Union[int, torch.Tensor] = 0,
+        total_steps: Union[int, torch.Tensor] = 1,
         current_epoch: int = 0,
         total_epochs: int = 80,
         mask: torch.Tensor = None,
@@ -105,8 +111,12 @@ class WordOrderAwareAttention(nn.Module):
         # (B, H_dec) -> (B, 1, A)
         projected_decoder = self.decoder_projection(decoder_hidden).unsqueeze(1)
 
-        src_positions = torch.arange(src_len, device=device)
-        relative = int(current_step) - src_positions
+        src_positions = torch.arange(src_len, device=device, dtype=torch.long)
+        step_float = self._as_scalar_tensor(current_step, device=device, dtype=encoder_outputs.dtype)
+        step_index = torch.round(step_float).to(dtype=torch.long)
+        total_steps_float = self._as_scalar_tensor(total_steps, device=device, dtype=encoder_outputs.dtype).clamp_min(1.0)
+
+        relative = step_index - src_positions
         relative = torch.clamp(relative, min=-self.max_relative_position, max=self.max_relative_position)
         relative_ids = relative + self.max_relative_position
 
@@ -118,9 +128,10 @@ class WordOrderAwareAttention(nn.Module):
         energy = self.energy_projection(torch.tanh(projected_encoder + projected_decoder + projected_position)).squeeze(-1)
 
         if self.use_order_guidance and self._guidance_lambda.item() > 0:
-            target_center = float(current_step) * (float(src_len) / float(max(1, total_steps)))
-            distance = (src_positions.to(dtype=encoder_outputs.dtype) - target_center) / max(1.0, float(src_len))
-            prior = -self._guidance_lambda * (distance**2)
+            src_len_float = torch.tensor(float(src_len), device=device, dtype=encoder_outputs.dtype)
+            target_center = step_float * (src_len_float / total_steps_float)
+            distance = (src_positions.to(dtype=encoder_outputs.dtype) - target_center) / src_len_float.clamp_min(1.0)
+            prior = -self._guidance_lambda.to(dtype=encoder_outputs.dtype) * (distance**2)
             energy = energy + prior.unsqueeze(0)
 
         energy = energy.masked_fill(~mask, -1e9)

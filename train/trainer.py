@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import json
 import logging
 from pathlib import Path
@@ -327,6 +327,99 @@ class Trainer:
             "samples": samples,
         }
 
+    def evaluate_split(
+        self,
+        dataloader: Iterable,
+        split: str = "val",
+        sample_size: Optional[int] = None,
+        collect_predictions: bool = False,
+    ) -> Dict[str, Any]:
+        """Evaluate one split and optionally collect all predictions.
+
+        Args:
+            dataloader: Evaluation dataloader.
+            split: Split name for progress display.
+            sample_size: Number of sampled rows to retain. ``None`` falls back to
+                ``self.validation_sample_size``.
+            collect_predictions: When ``True``, include full split rows in the
+                ``predictions`` field.
+        """
+        self.model.eval()
+        total_loss = 0.0
+        total_batches = 0
+        hypotheses: List[str] = []
+        references: List[str] = []
+        samples: List[Dict[str, str]] = []
+        predictions: List[Dict[str, str]] = []
+        gloss_vocab = getattr(dataloader.dataset, "gloss_vocab", None)
+        zh_vocab = getattr(dataloader.dataset, "zh_vocab", None)
+        resolved_sample_size = self.validation_sample_size if sample_size is None else max(0, int(sample_size))
+
+        with torch.no_grad():
+            progress = tqdm(dataloader, desc=f"Evaluate {split}", leave=False)
+            for step_idx, batch in enumerate(progress):
+                gloss_ids, _, zh_ids, _ = batch
+                gloss_ids = gloss_ids.to(self.device)
+                zh_ids = zh_ids.to(self.device)
+
+                logits, attention_weights = self._forward_with_attention(gloss_ids, zh_ids, teacher_forcing_ratio=0.0)
+                ce_loss = self._compute_ce_loss(logits, zh_ids)
+                loss, breakdown = self._combine_loss(ce_loss, attention_weights, step_idx)
+                total_loss += float(loss.item())
+                total_batches += 1
+                progress.set_postfix(total=f"{loss.item():.4f}", ce=f"{breakdown['ce']:.4f}")
+
+                if zh_vocab is None:
+                    continue
+
+                decoded_batch = self.model.translate(
+                    gloss_ids,
+                    max_len=zh_ids.size(1) - 1,
+                    beam_size=self.validation_beam_size,
+                )
+                for source_ids, predicted_ids, reference_ids in zip(
+                    gloss_ids.cpu(),
+                    decoded_batch.cpu(),
+                    zh_ids.cpu(),
+                ):
+                    hypothesis = zh_vocab.decode(predicted_ids.tolist())
+                    reference = zh_vocab.decode(reference_ids.tolist())
+                    gloss_text = gloss_vocab.decode(source_ids.tolist()) if gloss_vocab is not None else ""
+                    row = {
+                        "gloss": gloss_text,
+                        "reference": reference,
+                        "prediction": hypothesis,
+                    }
+                    hypotheses.append(hypothesis)
+                    references.append(reference)
+                    if len(samples) < resolved_sample_size:
+                        samples.append(row)
+                    if collect_predictions:
+                        predictions.append(row)
+
+        average_loss = total_loss / max(1, total_batches)
+        if not hypotheses:
+            result = {
+                "loss": average_loss,
+                "bleu4": 0.0,
+                "rouge_l": 0.0,
+                "wer": 0.0,
+                "samples": samples,
+            }
+            if collect_predictions:
+                result["predictions"] = predictions
+            return result
+
+        result = {
+            "loss": average_loss,
+            "bleu4": compute_bleu4(hypotheses, references),
+            "rouge_l": compute_rouge_l(hypotheses, references),
+            "wer": compute_wer(hypotheses, references),
+            "samples": samples,
+        }
+        if collect_predictions:
+            result["predictions"] = predictions
+        return result
     def _archive_legacy_log_if_needed(self) -> None:
         if not self.log_path.exists():
             return

@@ -28,6 +28,12 @@ def _verify_decoder(model_path: Path) -> Dict[str, tuple]:
         "enc_output": np.zeros((1, 8, 512), dtype=np.float32),
         "src_mask": np.ones((1, 8), dtype=np.bool_),
     }
+    input_names = {meta.name for meta in session.get_inputs()}
+    if "current_step" in input_names:
+        inputs["current_step"] = np.asarray(0, dtype=np.int64)
+    if "total_steps" in input_names:
+        inputs["total_steps"] = np.asarray(8, dtype=np.int64)
+
     outputs = session.run(None, inputs)
     return {meta.name: output.shape for meta, output in zip(session.get_outputs(), outputs)}
 
@@ -45,11 +51,9 @@ def quantize_models(model_dir: str, output_dir: str) -> None:
             model_output=target_path.as_posix(),
             weight_type=QuantType.QInt8,
         )
-        print(
-            f"{name} 量化完成：FP32 {_size_mb(source_path):.2f} MB -> INT8 {_size_mb(target_path):.2f} MB"
-        )
+        print(f"{name} quantized: FP32 {_size_mb(source_path):.2f} MB -> INT8 {_size_mb(target_path):.2f} MB")
 
     encoder_shapes = _verify_encoder(target_dir / "encoder.int8.onnx")
     decoder_shapes = _verify_decoder(target_dir / "decoder.int8.onnx")
-    print(f"编码器量化模型校验通过：{encoder_shapes}")
-    print(f"解码器量化模型校验通过：{decoder_shapes}")
+    print(f"Encoder quantized model verified: {encoder_shapes}")
+    print(f"Decoder quantized model verified: {decoder_shapes}")

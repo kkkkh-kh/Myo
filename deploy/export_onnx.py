@@ -41,8 +41,17 @@ class DecoderExportWrapper(nn.Module):
         hidden: torch.Tensor,
         enc_output: torch.Tensor,
         src_mask: torch.Tensor,
+        current_step: torch.Tensor,
+        total_steps: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.decoder.forward_step(input_token, hidden, enc_output, src_mask)
+        return self.decoder.forward_step(
+            input_token,
+            hidden,
+            enc_output,
+            src_mask,
+            current_step=current_step,
+            total_steps=total_steps,
+        )
 
 
 def _size_mb(path: Path) -> float:
@@ -134,7 +143,7 @@ def load_model_for_export(
     resolved_checkpoint = Path(checkpoint_path) if checkpoint_path is not None else _resolve_checkpoint_path(save_path, config)
     load_checkpoint_into_model(model, resolved_checkpoint)
     model.eval()
-    print(f"当前导出的权重文件: {resolved_checkpoint}")
+    print(f"Export checkpoint: {resolved_checkpoint}")
     return model, resolved_checkpoint, config
 
 
@@ -160,9 +169,9 @@ def export_to_onnx(
     if model is None:
         model, _, _ = load_model_for_export(save_dir=save_dir, config_path=config_path, checkpoint_path=checkpoint_path)
     elif checkpoint_path is not None:
-        print(f"当前导出的权重文件: {Path(checkpoint_path)}")
+        print(f"Export checkpoint: {Path(checkpoint_path)}")
     else:
-        print("当前导出的权重文件: <in-memory model>")
+        print("Export checkpoint: <in-memory model>")
 
     encoder_wrapper = EncoderExportWrapper(model.encoder).eval()
     decoder_wrapper = DecoderExportWrapper(model.decoder).eval()
@@ -173,6 +182,8 @@ def export_to_onnx(
     dummy_decoder_hidden = model.decoder.init_hidden(dummy_enc_hidden)
     dummy_input_token = torch.ones(1, dtype=torch.long, device=device)
     dummy_mask = dummy_gloss.ne(model.pad_id)
+    dummy_current_step = torch.tensor(0, dtype=torch.long, device=device)
+    dummy_total_steps = torch.tensor(1, dtype=torch.long, device=device)
 
     encoder_path = save_path / "encoder.onnx"
     decoder_path = save_path / "decoder.onnx"
@@ -193,9 +204,9 @@ def export_to_onnx(
 
     torch.onnx.export(
         decoder_wrapper,
-        (dummy_input_token, dummy_decoder_hidden, dummy_enc_output, dummy_mask),
+        (dummy_input_token, dummy_decoder_hidden, dummy_enc_output, dummy_mask, dummy_current_step, dummy_total_steps),
         decoder_path.as_posix(),
-        input_names=["input_token", "hidden", "enc_output", "src_mask"],
+        input_names=["input_token", "hidden", "enc_output", "src_mask", "current_step", "total_steps"],
         output_names=["logits", "next_hidden", "attn_weights"],
         dynamic_axes={
             "input_token": {0: "batch"},
@@ -212,7 +223,5 @@ def export_to_onnx(
     onnx.checker.check_model(onnx.load(encoder_path.as_posix()))
     onnx.checker.check_model(onnx.load(decoder_path.as_posix()))
 
-    print(f"编码器 ONNX 导出完成，大小 {_size_mb(encoder_path):.2f} MB")
-    print(f"解码器 ONNX 导出完成，大小 {_size_mb(decoder_path):.2f} MB")
-
-
+    print(f"Encoder ONNX exported: {_size_mb(encoder_path):.2f} MB")
+    print(f"Decoder ONNX exported: {_size_mb(decoder_path):.2f} MB")

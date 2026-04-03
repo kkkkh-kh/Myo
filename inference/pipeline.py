@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -6,7 +6,7 @@ import numpy as np
 import onnxruntime as ort
 import yaml
 
-from data.preprocess import tokenize_gloss,merge_number_tokens
+from data.preprocess import tokenize_gloss
 from data.vocabulary import Vocabulary
 from modules.postprocess import PostProcessor
 from modules.preorder import PreorderModule
@@ -49,6 +49,7 @@ class TranslationPipeline:
         self.zh_vocab: Optional[Vocabulary] = None
         self.encoder_session: Optional[ort.InferenceSession] = None
         self.decoder_session: Optional[ort.InferenceSession] = None
+        self.decoder_input_names: set[str] = set()
 
     def _session_options(self) -> ort.SessionOptions:
         options = ort.SessionOptions()
@@ -86,10 +87,10 @@ class TranslationPipeline:
             sess_options=options,
             providers=["CPUExecutionProvider"],
         )
+        self.decoder_input_names = {meta.name for meta in self.decoder_session.get_inputs()}
 
     def _prepare_gloss_ids(self, gloss_sequence: str) -> np.ndarray:
         tokens = tokenize_gloss(gloss_sequence)
-        tokens = merge_number_tokens(gloss_sequence)
         tokens = self.preorder.reorder(tokens)
         token_ids = self.gloss_vocab.encode(tokens, add_eos=True)[: self.max_seq_len]
         if not token_ids:
@@ -110,13 +111,13 @@ class TranslationPipeline:
         return tokens
 
     def _apply_generation_constraints(
-            self, 
-            logits: np.ndarray, 
-            step: int,
-            predicted_ids:Optional[List[int]]=None,
-            repetition_penalty:float=1.3,
-            no_repeat_ngram_size:int =3
-            ) -> np.ndarray:
+        self,
+        logits: np.ndarray,
+        step: int,
+        predicted_ids: Optional[List[int]] = None,
+        repetition_penalty: float = 1.3,
+        no_repeat_ngram_size: int = 3,
+    ) -> np.ndarray:
         constrained = np.array(logits, copy=True)
         constrained[..., Vocabulary.PAD_ID] = -np.inf
         constrained[..., Vocabulary.BOS_ID] = -np.inf
@@ -130,9 +131,9 @@ class TranslationPipeline:
                     else:
                         constrained[..., token_id] *= repetition_penalty
             if no_repeat_ngram_size > 1 and len(predicted_ids) >= no_repeat_ngram_size - 1:
-                ngram_prefix = tuple(predicted_ids[-(no_repeat_ngram_size - 1):])
+                ngram_prefix = tuple(predicted_ids[-(no_repeat_ngram_size - 1) :])
                 for i in range(len(predicted_ids) - no_repeat_ngram_size + 1):
-                    if tuple(predicted_ids[i:i + no_repeat_ngram_size - 1]) == ngram_prefix:
+                    if tuple(predicted_ids[i : i + no_repeat_ngram_size - 1]) == ngram_prefix:
                         banned_token = predicted_ids[i + no_repeat_ngram_size - 1]
                         constrained[..., banned_token] = -np.inf
         return constrained
@@ -147,22 +148,25 @@ class TranslationPipeline:
         predicted_ids: List[int] = []
 
         for step in range(self.max_decode_len):
-            logits, hidden, _ = self.decoder_session.run(
-                None,
-                {
-                    "input_token": input_token,
-                    "hidden": hidden,
-                    "enc_output": enc_output,
-                    "src_mask": src_mask,
-                },
-            )
+            decoder_inputs = {
+                "input_token": input_token,
+                "hidden": hidden,
+                "enc_output": enc_output,
+                "src_mask": src_mask,
+            }
+            if "current_step" in self.decoder_input_names:
+                decoder_inputs["current_step"] = np.asarray(step, dtype=np.int64)
+            if "total_steps" in self.decoder_input_names:
+                decoder_inputs["total_steps"] = np.asarray(self.max_decode_len, dtype=np.int64)
+
+            logits, hidden, _ = self.decoder_session.run(None, decoder_inputs)
             constrained_logits = self._apply_generation_constraints(
-            logits,
-            step,
-            predicted_ids=predicted_ids,
-            repetition_penalty=1.3,
-            no_repeat_ngram_size=3,
-        )
+                logits,
+                step,
+                predicted_ids=predicted_ids,
+                repetition_penalty=1.3,
+                no_repeat_ngram_size=3,
+            )
             next_token = int(np.argmax(constrained_logits, axis=-1)[0])
             if next_token == Vocabulary.EOS_ID:
                 break
@@ -175,7 +179,7 @@ class TranslationPipeline:
 
         final_sentence, triggered_rules = self.word_order_postprocess.process(raw_sentence, source_gloss=gloss_sequence)
         if triggered_rules:
-            LOGGER.debug("后处理触发规则: %s", triggered_rules)
+            LOGGER.debug("鍚庡鐞嗚Е鍙戣鍒? %s", triggered_rules)
         return final_sentence
 
     def batch_translate(self, gloss_list: List[str]) -> List[str]:

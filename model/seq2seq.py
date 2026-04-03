@@ -1,4 +1,4 @@
-﻿from typing import List, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -135,7 +135,7 @@ class Seq2Seq(nn.Module):
 
     def _beam_translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int, min_len: int = 1) -> torch.Tensor:
         if gloss_ids.size(0) != 1:
-            return self._greedy_translate(gloss_ids, max_len, min_len=min_len)
+            raise ValueError("_beam_translate expects batch size 1")
 
         enc_output, encoder_hidden = self.encoder(gloss_ids)
         src_mask = gloss_ids.ne(self.pad_id)
@@ -182,7 +182,15 @@ class Seq2Seq(nn.Module):
     def translate(self, gloss_ids: torch.Tensor, max_len: int, beam_size: int = 1, min_len: int = 1) -> torch.Tensor:
         if beam_size <= 1:
             return self._greedy_translate(gloss_ids, max_len, min_len=min_len)
-        return self._beam_translate(gloss_ids, max_len, beam_size, min_len=min_len)
+        if gloss_ids.size(0) == 1:
+            return self._beam_translate(gloss_ids, max_len, beam_size, min_len=min_len)
+
+        # Keep behavior consistent for batch decoding by running beam search per sample.
+        predictions = [
+            self._beam_translate(gloss_ids[index : index + 1], max_len, beam_size, min_len=min_len)
+            for index in range(gloss_ids.size(0))
+        ]
+        return torch.cat(predictions, dim=0)
 
     def count_parameters(self) -> int:
         return sum(param.numel() for param in self.parameters() if param.requires_grad)
